@@ -26,6 +26,10 @@ Any change must keep this true. Concretely:
 - **Never** install pi-web-ui or the pi CLI into `/data/npm` at build time — a
   fresh, empty volume would leave the container without its app. They belong in
   the image prefix (`/usr/local`).
+- Keep `/usr/local/bin` ahead of `/data/npm/bin` on `PATH`. `PI_WEB_MANAGED=1`
+  disables in-app updates by design, so pulling/rebuilding the image is the only
+  upgrade path — an older pi-web-ui persisted in `/data/npm` must never shadow
+  the baked one.
 - **Never** move `HOME`, `NPM_CONFIG_PREFIX` or `PI_CODING_AGENT_DIR` out of
   `/data` — that silently breaks tool persistence, which is the whole point.
 - Keep `/data/npm/bin` and the `$HOME`-relative tool bins on `PATH`, both in the

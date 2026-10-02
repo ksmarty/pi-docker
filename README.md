@@ -27,7 +27,7 @@ lives in two mounts:
 | --- | --- | --- |
 | `/data/home` | `HOME` | `~/.pi-web` (UI state, plugins, uploads), `~/.npm` cache, `~/.local/bin` (`pip --user`, `uv`, `pipx`), `~/.cargo`, `~/go`, `~/.bun` |
 | `/data/agent` | `PI_CODING_AGENT_DIR` | pi's config, API keys, sessions, packages/extensions, and its own `bin/` |
-| `/data/npm` | `NPM_CONFIG_PREFIX` | every `npm install -g <tool>` the agent performs |
+| `/data/npm` | `NPM_CONFIG_PREFIX` | every `npm install -g <tool>` the agent performs (not the app itself — that lives in the image) |
 | `/workspace` | `PI_WEB_CWD` | the agent's project files |
 
 `/data` is a single volume, so one bind mount (`${USERDIR}/data/pi/data:/data`)
@@ -57,11 +57,36 @@ npm packages with native bindings (including `node-pty`) compile on install.
 
 ### Updates
 
-- **pi-web-ui itself** is baked into the image at `/usr/local`. The image is
-  rebuilt by the Release workflow, or you can rebuild locally.
-- A **self-update from inside the UI** installs into the persisted `/data/npm`,
-  which comes first on `PATH` and therefore takes precedence over the baked copy —
-  so UI-initiated updates also survive restarts.
+pi-web-ui is **managed by the image**: it is installed at `/usr/local`, which
+comes first on `PATH`. `PI_WEB_MANAGED=1` makes the in-app updater refuse by
+design ("managed from outside") — the update panel is meant to be driven by
+whoever deploys the image.
+
+To update:
+
+```bash
+docker compose pull && docker compose up -d      # published image
+docker compose up -d --build                     # local build
+```
+
+Because `/data/npm` is *not* first on `PATH`, an older pi-web-ui left there by a
+previous first-start install cannot shadow the baked one. `/data/npm` stays on
+`PATH`, so the extra tools the agent installs there keep working.
+
+### Migrating from the first-start install
+
+The original compose installed pi into `/data/npm` on first boot. That data keeps
+working as-is, but those app copies are now unused and shadowed. Optionally
+reclaim the space — this does **not** touch extra tools you installed:
+
+```bash
+docker compose down
+sudo rm -rf "$USERDIR/data/pi/data/npm/lib/node_modules/pi-web-ui" \
+            "$USERDIR/data/pi/data/npm/lib/node_modules/@earendil-works" \
+            "$USERDIR/data/pi/data/npm/bin/pi-web-ui" \
+            "$USERDIR/data/pi/data/npm/bin/pi"
+docker compose up -d
+```
 
 ## Configuration
 

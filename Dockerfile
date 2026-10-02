@@ -34,8 +34,11 @@
 #   /workspace      PI_WEB_CWD    -> the agent's project files
 #
 # The app itself (pi-web-ui, pi CLI) is installed into the image's own prefix
-# (/usr/local) and is therefore immutable. A self-update from inside the UI
-# installs into /data/npm, which is first on PATH, so updates still stick.
+# (/usr/local) and that prefix comes FIRST on PATH, ahead of /data/npm: the image
+# is the source of truth for pi-web-ui. That matters twice over — PI_WEB_MANAGED=1
+# makes the in-app updater refuse by design ("managed from outside"), and an older
+# pi-web-ui left in /data/npm by a previous first-start install must not shadow
+# the version the image was built with. /data/npm stays on PATH for extra tools.
 # ---------------------------------------------------------------------------
 
 FROM node:22-bookworm-slim
@@ -92,7 +95,7 @@ ENV HOME=/data/home \
     PI_WEB_PORT=8787 \
     PI_WEB_MANAGED=1 \
     NODE_ENV=production \
-    PATH=/data/agent/bin:/data/npm/bin:/data/home/.local/bin:/data/home/.cargo/bin:/data/home/go/bin:/data/home/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/data/agent/bin:/usr/local/sbin:/usr/local/bin:/data/npm/bin:/data/home/.local/bin:/data/home/.cargo/bin:/data/home/go/bin:/data/home/.bun/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

@@ -41,21 +41,23 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # The image is already loaded, so this also checks that the baked-in app
-      # really is on PATH and starts — the failure mode a plain build hides.
-      # node-pty is the one native dependency, so loading it proves the C/C++
-      # toolchain actually compiled it for this architecture.
+      # The image is already loaded, so this checks that the baked-in app really
+      # is on PATH and starts — the failure mode a plain build hides. It runs
+      # through the real entrypoint and a login shell, so it also covers the
+      # entrypoint's mkdir/profile.d work and the PATH ordering that keeps a
+      # stale /data/npm copy from shadowing the image's pi-web-ui.
       - name: Smoke-test the image
         run: |
           set -euo pipefail
-          docker run --rm --entrypoint bash pi-docker:ci -lc '
+          docker run --rm pi-docker:ci bash -lc '
             set -euo pipefail
-            command -v pi-web-ui
-            command -v pi
-            pi-web-ui --version
-            pi --version
+            test -f /etc/profile.d/pi-paths.sh
             test -d /data/npm
             test -d /data/agent
+            test "$(command -v pi-web-ui)" = "/usr/local/bin/pi-web-ui"
+            test "$(command -v pi)" = "/usr/local/bin/pi"
+            pi-web-ui --version
+            pi --version
             node -e "require(\"/usr/local/lib/node_modules/pi-web-ui/node_modules/node-pty\"); console.log(\"node-pty ok\")"
           '
 
