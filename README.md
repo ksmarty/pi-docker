@@ -1,0 +1,196 @@
+# pi-docker
+
+A self-contained Docker image for the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
+and its web UI, [pi-web-ui](https://www.npmjs.com/package/pi-web-ui).
+
+It bakes the app and its build toolchain into the image so the container starts
+in seconds, and it funnels **everything persistent** — pi's config and sessions,
+the UI state, and any tool the agent installs — into a single `/data` volume plus
+the `/workspace` project directory.
+
+```bash
+docker compose -f compose.ghcr.yaml up -d     # published image
+# or
+docker compose up -d                          # build locally
+```
+
+Then open `http://localhost:8787`.
+
+---
+
+## The persistence model
+
+Everything that must survive a rebuild, a `docker compose down`, or a restart
+lives in two mounts:
+
+| Mount | Env | Holds |
+| --- | --- | --- |
+| `/data/home` | `HOME` | `~/.pi-web` (UI state, plugins, uploads), `~/.npm` cache, `~/.local/bin` (`pip --user`, `uv`, `pipx`), `~/.cargo`, `~/go`, `~/.bun` |
+| `/data/agent` | `PI_CODING_AGENT_DIR` | pi's config, API keys, sessions, packages/extensions, and its own `bin/` |
+| `/data/npm` | `NPM_CONFIG_PREFIX` | every `npm install -g <tool>` the agent performs |
+| `/workspace` | `PI_WEB_CWD` | the agent's project files |
+
+`/data` is a single volume, so one bind mount (`${USERDIR}/data/pi/data:/data`)
+captures all of it.
+
+### Installing tools that stick
+
+Because `NPM_CONFIG_PREFIX` points into the volume and `HOME` does too, the agent
+can install tools at runtime and they are still there after a restart:
+
+```bash
+npm install -g some-cli          # -> /data/npm/bin/some-cli        (persisted)
+pip install --user some-python   # -> /data/home/.local/bin/...    (persisted)
+cargo install some-rust-cli      # -> /data/home/.cargo/bin/...    (persisted)
+go install example.com/x@latest  # -> /data/home/go/bin/...        (persisted)
+bun add -g some-tool             # -> /data/home/.bun/bin/...      (persisted)
+```
+
+All of those directories are already on `PATH` — for the server process **and**
+for the web UI's terminal tab (the entrypoint also writes
+`/etc/profile.d/pi-paths.sh`). `apt-get install` writes to the image layer and is
+therefore **not** persisted; use it for one-off system packages only, or extend
+the `Dockerfile`.
+
+The image ships the C/C++ toolchain (`python3`, `make`, `g++`) on purpose: many
+npm packages with native bindings (including `node-pty`) compile on install.
+
+### Updates
+
+- **pi-web-ui itself** is baked into the image at `/usr/local`. The image is
+  rebuilt by the Release workflow, or you can rebuild locally.
+- A **self-update from inside the UI** installs into the persisted `/data/npm`,
+  which comes first on `PATH` and therefore takes precedence over the baked copy —
+  so UI-initiated updates also survive restarts.
+
+## Configuration
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PI_WEB_HOST` | `0.0.0.0` | Listen address. Keep `0.0.0.0` for port mapping. |
+| `PI_WEB_PORT` | `8787` | HTTP port. |
+| `PI_WEB_CWD` | `/workspace` | Directory the agent works in. |
+| `PI_WEB_DATA_DIR` | `/data/home/.pi-web` | UI state, plugins, uploads. |
+| `PI_CODING_AGENT_DIR` | `/data/agent` | pi config, sessions, API keys. |
+| `PI_WEB_MANAGED` | `1` | Managed mode (supervisor controls restart/quit). |
+| `PI_WEB_ALLOW_HOSTS` | *(unset)* | Comma-separated extra `Host` values accepted, e.g. `pi.example.com`. |
+| `PI_WEB_ALLOW_ORIGINS` | *(unset)* | Comma-separated `Origin` values accepted, e.g. `https://pi.example.com`. |
+| `PI_WEB_TOKEN` | *(unset)* | If set, the UI requires `/?token=<value>` once, then sets a cookie. |
+| `NPM_CONFIG_PREFIX` | `/data/npm` | Global npm prefix — the persisted tool directory. |
+| `HOME` | `/data/home` | Persisted home for the agent and its tools. |
+
+Behind a reverse proxy (Traefik, Caddy, nginx), set `PI_WEB_ALLOW_HOSTS` and
+`PI_WEB_ALLOW_ORIGINS` to your public hostname/origin or the websocket upgrade
+will be rejected.
+
+### Versions
+
+Both packages are installed at build time and can be pinned:
+
+```bash
+docker build \
+  --build-arg PI_WEB_UI_VERSION=0.85.0 \
+  --build-arg PI_CODING_AGENT_VERSION=0.85.1 \
+  -t pi-docker .
+```
+
+Defaults to `latest`. In compose these are `${PI_WEB_UI_VERSION}` /
+`${PI_CODING_AGENT_VERSION}`.
+
+## Run the published image (GHCR)
+
+The image is published by the Release workflow to
+**`ghcr.io/ksmarty/pi-docker`**, tagged with a semver version and `latest`.
+
+```bash
+cp .env.example .env      # set USERDIR (and your domain)
+docker compose -f compose.ghcr.yaml up -d
+```
+
+`compose.ghcr.yaml` includes the Traefik labels used in production
+(`pi.notato.xyz`, `authentik@file` middleware) — adjust or delete them for your
+setup. GHCR packages are private by default; make the package public or log in
+with a token if you do not want to authenticate at pull time.
+
+## Run with docker compose (local build)
+
+```bash
+docker compose up -d --build
+docker compose logs -f
+```
+
+`docker-compose.yml` mounts `${USERDIR}/data/pi/data` and
+`${USERDIR}/data/pi/workspace`; set `USERDIR` in `.env` first (see
+`.env.example`).
+
+## Plain `docker run`
+
+```bash
+docker run -d --init --name pi-web-ui -p 8787:8787 \
+  -v "$PWD/data:/data" \
+  -v "$PWD/workspace:/workspace" \
+  -e PI_WEB_ALLOW_HOSTS=pi.example.com \
+  -e PI_WEB_ALLOW_ORIGINS=https://pi.example.com \
+  pi-docker
+```
+
+`--init` is recommended (the image runs the server as PID 1 and the agent spawns
+shell/PTY children).
+
+## Health
+
+The image declares a healthcheck against `GET /api/health`:
+
+```bash
+docker inspect --format '{{.State.Health.Status}}' pi-web-ui
+```
+
+`/api/health` is intentionally unauthenticated (it exposes no secrets), so it
+works even when `PI_WEB_TOKEN` is set.
+
+## Backup and restore
+
+Everything is under one directory. Stop, copy, done:
+
+```bash
+docker compose down
+tar czf pi-backup-$(date +%F).tar.gz -C "$USERDIR/data" pi
+docker compose up -d
+```
+
+Restoring is the same in reverse: unpack so that `data/pi/data` and
+`data/pi/workspace` are back in place.
+
+## CI & releases
+
+| Workflow | Trigger | Does |
+| --- | --- | --- |
+| `.github/workflows/ci.yml` | push to `main`, every PR | Builds the image for `linux/amd64`, smoke-tests that `pi-web-ui`/`pi` are on `PATH` and the CLI runs, validates both compose files. |
+| `.github/workflows/release.yml` | push to `main`, manual dispatch | Computes the next semver tag from conventional commits, builds and pushes a multi-arch (`amd64`/`arm64`) image to GHCR, creates a GitHub Release. |
+
+Commits are classified the usual way: `feat!:`/`BREAKING CHANGE` → major,
+`feat:` → minor, anything else → patch. Manual runs choose the bump.
+
+## Notes
+
+- The container runs as **root** by design: the agent installs system packages
+  and writes into host bind mounts. To run unprivileged, add `user: "1000:1000"`
+  (or similar) **and** `chown` the host directories to that uid.
+- The C/C++ toolchain is intentionally kept in the final image so the agent can
+  rebuild native modules; this trades some image size for a working `npm i -g`.
+
+## Repository layout
+
+```
+Dockerfile              single-stage image (node:22-bookworm-slim)
+docker-entrypoint.sh    creates the persisted dirs, fixes up PATH, execs the server
+docker-compose.yml      local build
+compose.ghcr.yaml       published image (Traefik ready)
+.env.example            USERDIR / host-origin / token
+.github/workflows/      CI + release
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE). pi and pi-web-ui are MIT-licensed projects by their
+respective authors.

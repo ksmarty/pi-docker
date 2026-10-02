@@ -1,0 +1,56 @@
+# pi-docker — build the image locally and run it.
+#
+#   docker compose up -d
+#
+# Prefer the published image? Use compose.ghcr.yaml instead.
+#
+# The two bind mounts are the whole persistence story: everything the agent is
+# or installs lives inside them (see the persistence model in the Dockerfile).
+services:
+  pi-web-ui:
+    build:
+      context: .
+      args:
+        # Pin at build time for a reproducible image, e.g. 0.85.0.
+        PI_WEB_UI_VERSION: ${PI_WEB_UI_VERSION:-latest}
+        PI_CODING_AGENT_VERSION: ${PI_CODING_AGENT_VERSION:-latest}
+    image: pi-docker:latest
+    container_name: pi-web-ui
+    # `init: true` reaps the zombie processes the agent's shell/PTY children
+    # would otherwise leave behind as PID 1.
+    init: true
+    restart: unless-stopped
+    # Root on purpose: the agent installs system packages (apt) and writes into
+    # host bind mounts, which a non-root uid cannot do. Drop this only if you
+    # also chown the host directories to the uid you switch to.
+    user: "0:0"
+    ports:
+      - "8787:8787"
+    environment:
+      PI_WEB_HOST: 0.0.0.0
+      PI_WEB_MANAGED: 1
+      PI_WEB_CWD: /workspace
+      # Host/Origin allow-lists — set these when the UI sits behind a reverse
+      # proxy so the websocket upgrade is not rejected. Leave unset for
+      # direct IP:port access.
+      # PI_WEB_ALLOW_HOSTS: pi.example.com
+      # PI_WEB_ALLOW_ORIGINS: https://pi.example.com
+      # Optional shared-secret gate: the browser must open /?token=<value>.
+      # PI_WEB_TOKEN: ${PI_WEB_TOKEN:-}
+    volumes:
+      # HOME + pi config/sessions + npm global prefix + UI state + the pi CLI's
+      # own bin/ all live under here.
+      - ${USERDIR:-.}/data/pi/data:/data
+      # The agent's project files (PI_WEB_CWD).
+      - ${USERDIR:-.}/data/pi/workspace:/workspace
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.pi.rule=Host(`pi.notato.xyz`)
+      - traefik.http.routers.pi.middlewares=authentik@file
+      - traefik.http.services.pi.loadbalancer.server.port=8787
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    external: true

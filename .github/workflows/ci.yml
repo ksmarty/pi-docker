@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref (a new push to a PR branch, etc.).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    name: Docker build (linux/amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # No push: this proves the Dockerfile still builds from a clean checkout.
+      # The multi-arch publish lives in release.yml.
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: pi-docker:ci
+          build-args: |
+            VERSION=ci
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image is already loaded, so this also checks that the baked-in app
+      # really is on PATH and starts — the failure mode a plain build hides.
+      # node-pty is the one native dependency, so loading it proves the C/C++
+      # toolchain actually compiled it for this architecture.
+      - name: Smoke-test the image
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint bash pi-docker:ci -lc '
+            set -euo pipefail
+            command -v pi-web-ui
+            command -v pi
+            pi-web-ui --version
+            pi --version
+            test -d /data/npm
+            test -d /data/agent
+            node -e "require(\"/usr/local/lib/node_modules/pi-web-ui/node_modules/node-pty\"); console.log(\"node-pty ok\")"
+          '
+
+  compose:
+    name: Compose files are valid
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Validate compose files
+        env:
+          USERDIR: /tmp/pi-docker
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml config >/dev/null
+          docker compose -f compose.ghcr.yaml config >/dev/null

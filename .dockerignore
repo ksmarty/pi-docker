@@ -1,0 +1,24 @@
+# Never ship the persisted data or the checkout's git history into the image.
+data/
+.git
+.gitignore
+.github
+.env
+.env.*
+*.log
+
+# Docs and editor/OS noise
+README.md
+AGENTS.md
+LICENSE
+*.md
+.vscode
+.idea
+.DS_Store
+
+# The image only needs the Dockerfile, the entrypoint and the compose files are
+# not needed either.
+Dockerfile
+docker-compose.yml
+compose.ghcr.yaml
+.dockerignore

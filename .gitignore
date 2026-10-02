@@ -1,0 +1,12 @@
+# Local deployment data (bind-mounted into /data and /workspace)
+data/
+
+# Local compose overrides / secrets
+.env
+.env.local
+
+# Editor + OS noise
+.vscode/
+.idea/
+.DS_Store
+*.log

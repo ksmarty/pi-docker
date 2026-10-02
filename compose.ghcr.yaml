@@ -1,0 +1,50 @@
+# pi-docker — deploy the image published to GHCR by the Release workflow.
+#
+# No local build: the image must already exist on ghcr.io (Actions -> Release),
+# or use docker-compose.yml to build it yourself.
+#
+#   cp .env.example .env      # set USERDIR (and the domain)
+#   docker compose -f compose.ghcr.yaml up -d
+#
+# Adjust the Traefik host rule / cert resolver / middleware, the two bind-mount
+# paths and the external network to match your setup.
+services:
+  pi-web-ui:
+    image: ghcr.io/ksmarty/pi-docker:latest
+    container_name: pi-web-ui
+    # `init: true` reaps the zombie processes the agent's shell/PTY children
+    # would otherwise leave behind as PID 1.
+    init: true
+    restart: unless-stopped
+    # Root on purpose: the agent installs system packages (apt) and writes into
+    # host bind mounts, which a non-root uid cannot do.
+    user: "0:0"
+    ports:
+      - "8787:8787"
+    environment:
+      PI_WEB_HOST: 0.0.0.0
+      PI_WEB_MANAGED: 1
+      PI_WEB_CWD: /workspace
+      # Host/Origin allow-lists — set these when the UI sits behind a reverse
+      # proxy so the websocket upgrade is not rejected.
+      PI_WEB_ALLOW_HOSTS: ${PI_WEB_ALLOW_HOSTS:-pi.notato.xyz}
+      PI_WEB_ALLOW_ORIGINS: ${PI_WEB_ALLOW_ORIGINS:-https://pi.notato.xyz}
+      # Optional shared-secret gate: the browser must open /?token=<value>.
+      # PI_WEB_TOKEN: ${PI_WEB_TOKEN:-}
+    volumes:
+      # HOME + pi config/sessions + npm global prefix + UI state + the pi CLI's
+      # own bin/ all live under here.
+      - ${USERDIR:-.}/data/pi/data:/data
+      # The agent's project files (PI_WEB_CWD).
+      - ${USERDIR:-.}/data/pi/workspace:/workspace
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.pi.rule=Host(`pi.notato.xyz`)
+      - traefik.http.routers.pi.middlewares=authentik@file
+      - traefik.http.services.pi.loadbalancer.server.port=8787
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    external: true
