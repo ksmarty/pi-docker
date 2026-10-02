@@ -97,9 +97,9 @@ docker compose up -d
 | `PI_WEB_CWD` | `/workspace` | Directory the agent works in. |
 | `PI_WEB_DATA_DIR` | `/data/home/.pi-web` | UI state, plugins, uploads. |
 | `PI_CODING_AGENT_DIR` | `/data/agent` | pi config, sessions, API keys. |
-| `PI_WEB_MANAGED` | `1` | Managed mode (supervisor controls restart/quit). |
-| `PI_WEB_ALLOW_HOSTS` | *(unset)* | Comma-separated extra `Host` values accepted, e.g. `pi.example.com`. |
-| `PI_WEB_ALLOW_ORIGINS` | *(unset)* | Comma-separated `Origin` values accepted, e.g. `https://pi.example.com`. |
+| `PI_WEB_MANAGED` | `1` | Managed mode: the in-app updater and plugin-market installs *refuse*, because the image is the source of truth. |
+| `PI_WEB_ALLOW_HOSTS` | *(unset)* | Allow-list of `Host` hostnames for the websocket upgrade, e.g. `pi.example.com`. Unset = no host check. |
+| `PI_WEB_ALLOW_ORIGINS` | *(unset)* | Allow-list of `Origin` values for the websocket upgrade, e.g. `https://pi.example.com`. |
 | `PI_WEB_TOKEN` | *(unset)* | If set, the UI requires `/?token=<value>` once, then sets a cookie. |
 | `NPM_CONFIG_PREFIX` | `/data/npm` | Global npm prefix — the persisted tool directory. |
 | `HOME` | `/data/home` | Persisted home for the agent and its tools. |
@@ -134,8 +134,8 @@ docker compose -f compose.ghcr.yaml up -d
 
 `compose.ghcr.yaml` includes the Traefik labels used in production
 (`pi.notato.xyz`, `authentik@file` middleware) — adjust or delete them for your
-setup. GHCR packages are private by default; make the package public or log in
-with a token if you do not want to authenticate at pull time.
+setup. The GHCR package is public, so `docker pull` needs no authentication;
+make it private in the package settings if you would rather it were not.
 
 ## Run with docker compose (local build)
 
