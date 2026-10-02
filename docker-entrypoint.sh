@@ -30,6 +30,24 @@ export PATH="${PI_PATH_PREFIX}:${PATH}"
 # `mkdir -p ""` aborts the whole script under `set -e`.
 mkdir -p "${HOME}" "${NPM_CONFIG_PREFIX}" "${PI_CODING_AGENT_DIR}" "${PI_WEB_DATA_DIR}" "${PI_WEB_CWD}"
 
+# Expose the image's bundled agent skills to pi. They are symlinked, not copied:
+# the image stays the single source of truth (an image rebuild updates them) and
+# the persisted agent dir holds no duplicate. pi's loader follows symlinked
+# directories. Each link is created only when nothing is there, so a skill the
+# user replaced with their own real directory is left alone.
+SKILLS_SRC=/opt/pi-docker/skills
+if [ -d "${SKILLS_SRC}" ]; then
+  mkdir -p "${PI_CODING_AGENT_DIR}/skills"
+  for skill_dir in "${SKILLS_SRC}"/*/; do
+    [ -d "${skill_dir}" ] || continue
+    skill_name=$(basename "${skill_dir}")
+    skill_link="${PI_CODING_AGENT_DIR}/skills/${skill_name}"
+    if [ ! -e "${skill_link}" ] && [ ! -L "${skill_link}" ]; then
+      ln -s "${skill_dir%/}" "${skill_link}"
+    fi
+  done
+fi
+
 # The container ENV only covers the main process. The web UI's terminal tab and
 # anything else started as a login shell read this instead, so `pi`, `npm -g`
 # tools and the rest resolve in there too. Skipped when running unprivileged.

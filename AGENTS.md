@@ -36,6 +36,30 @@ Any change must keep this true. Concretely:
   image `ENV` and in `/etc/profile.d/pi-paths.sh` written by the entrypoint.
 - Keep `python3 make g++` in the final image: `node-pty` compiles from source on
   Linux, and the agent may need to build native modules later.
+- Keep `python3-pip` and the `rm -f /usr/lib/python3*/EXTERNALLY-MANAGED` line:
+  without them `pip install --user`, which the bundled skill documents as a
+  persistent install path, refuses to run under PEP 668.
+
+## Bundled skills
+
+`skills/<name>/SKILL.md` in this repo is baked into the image at
+`/opt/pi-docker/skills/`, and `docker-entrypoint.sh` symlinks each skill into
+`${PI_CODING_AGENT_DIR}/skills/` — the location pi scans for global skills.
+
+Rules that keep this working:
+
+- **Symlink, never copy.** The image must stay the single source of truth so a
+  rebuild updates the skill; a copy into the volume would freeze at first run.
+- **Never re-link over an existing path.** The link is created only when nothing
+  is there, so a user who replaced a skill with their own real directory keeps it.
+- **Never add a blanket `*.md` to `.dockerignore`** — it would drop
+  `skills/<name>/SKILL.md` from the build context.
+- Skills must keep valid frontmatter (`name` + non-empty `description`), or pi
+  silently ignores them. CI asserts discovery through pi's own loader, because a
+  file sitting in the image is not proof that the agent can see it.
+- Document the *image's actual layout* in a skill, and update the skill in the
+  same commit as any change to paths, env vars or the persistence model. A stale
+  skill actively misleads the agent.
 
 ## Dockerfile conventions
 
@@ -52,7 +76,8 @@ Any change must keep this true. Concretely:
 ## Entrypoint conventions
 
 - `docker-entrypoint.sh` only prepares state: `mkdir -p` the persisted dirs,
-  export the paths, write `/etc/profile.d/pi-paths.sh`, then `exec "$@"`.
+  symlink the bundled skills, export the paths, write `/etc/profile.d/pi-paths.sh`,
+  then `exec "$@"`.
 - It must stay idempotent and must not install or download anything at startup.
 - Keep the `:-` defaults on every variable — under `set -e`, `mkdir -p ""` kills
   the container.

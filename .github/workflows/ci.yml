@@ -59,6 +59,17 @@ jobs:
             pi-web-ui --version
             pi --version
             node -e "require(\"/usr/local/lib/node_modules/pi-web-ui/node_modules/node-pty\"); console.log(\"node-pty ok\")"
+            # pip install --user is the persistent Python path the bundled skill
+            # documents, so the PEP 668 guard must be gone.
+            python3 -m pip --version
+            if ls /usr/lib/python3*/EXTERNALLY-MANAGED >/dev/null 2>&1; then
+              echo "PEP 668 marker still present — pip install --user would refuse" >&2; exit 1
+            fi
+            # The skill must be symlinked into the agent dir AND be discoverable
+            # by the pi skill loader — a file in the image is not enough.
+            test -f /opt/pi-docker/skills/persistent-tool-install/SKILL.md
+            test -L /data/agent/skills/persistent-tool-install
+            node -e "import(\"/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js\").then((m) => { const r = m.loadSkills({ cwd: \"/workspace\", agentDir: \"/data/agent\", skillPaths: [], includeDefaults: true }); const n = r.skills.map((s) => s.name); if (!n.includes(\"persistent-tool-install\")) { console.error(\"skill not discovered: \" + n + \" diagnostics: \" + JSON.stringify(r.diagnostics)); process.exit(1); } console.log(\"skill discovered: \" + n.join(\",\")); }).catch((e) => { console.error(e); process.exit(1); })"
           '
 
   compose:

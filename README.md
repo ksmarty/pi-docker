@@ -26,7 +26,7 @@ lives in two mounts:
 | Mount | Env | Holds |
 | --- | --- | --- |
 | `/data/home` | `HOME` | `~/.pi-web` (UI state, plugins, uploads), `~/.npm` cache, `~/.local/bin` (`pip --user`, `uv`, `pipx`), `~/.cargo`, `~/go`, `~/.bun` |
-| `/data/agent` | `PI_CODING_AGENT_DIR` | pi's config, API keys, sessions, packages/extensions, and its own `bin/` |
+| `/data/agent` | `PI_CODING_AGENT_DIR` | pi's config, API keys, sessions, packages/extensions, `skills/`, and its own `bin/` |
 | `/data/npm` | `NPM_CONFIG_PREFIX` | every `npm install -g <tool>` the agent performs (not the app itself — that lives in the image) |
 | `/workspace` | `PI_WEB_CWD` | the agent's project files |
 
@@ -41,19 +41,41 @@ can install tools at runtime and they are still there after a restart:
 ```bash
 npm install -g some-cli          # -> /data/npm/bin/some-cli        (persisted)
 pip install --user some-python   # -> /data/home/.local/bin/...    (persisted)
-cargo install some-rust-cli      # -> /data/home/.cargo/bin/...    (persisted)
-go install example.com/x@latest  # -> /data/home/go/bin/...        (persisted)
-bun add -g some-tool             # -> /data/home/.bun/bin/...      (persisted)
+pipx install some-python-cli      # -> /data/home/.local/bin/...    (persisted)
+uv tool install some-python-cli   # -> /data/home/.local/bin/...    (persisted)
+cargo install some-rust-cli       # -> /data/home/.cargo/bin/...    (persisted)
+go install example.com/x@latest   # -> /data/home/go/bin/...        (persisted)
+bun add -g some-tool              # -> /data/home/.bun/bin/...      (persisted)
+curl -o /data/npm/bin/x <url> && chmod +x /data/npm/bin/x   # standalone binary
 ```
 
 All of those directories are already on `PATH` — for the server process **and**
 for the web UI's terminal tab (the entrypoint also writes
-`/etc/profile.d/pi-paths.sh`). `apt-get install` writes to the image layer and is
-therefore **not** persisted; use it for one-off system packages only, or extend
-the `Dockerfile`.
+`/etc/profile.d/pi-paths.sh`). `apt-get install` writes to the container
+filesystem, not the volume: it survives a plain restart but is gone the next time
+the container is recreated, and it is not in a `/data` backup. Use it for one-off
+system packages only, or add the package to the `Dockerfile`.
 
 The image ships the C/C++ toolchain (`python3`, `make`, `g++`) on purpose: many
-npm packages with native bindings (including `node-pty`) compile on install.
+npm packages with native bindings (including `node-pty`) compile on install. The
+PEP 668 "externally managed" marker is removed so `pip install --user` works —
+the toolchains that are *not* built in (`uv`, `pipx`, `cargo`, `go`, `bun`) still
+install into `$HOME` and persist, because `HOME` is on the volume.
+
+### The bundled skill
+
+The image ships an agent skill that documents exactly this —
+[`skills/persistent-tool-install/`](skills/persistent-tool-install/SKILL.md) — so
+the agent knows which install paths survive a restart and which do not, without
+being told. The entrypoint symlinks it into `${PI_CODING_AGENT_DIR}/skills/`
+(where pi discovers global skills), so:
+
+- it is available out of the box, including to `/skill:persistent-tool-install`;
+- an image rebuild updates it, because the link points into the image, not a copy;
+- a skill *you* replace with a real directory of the same name is left untouched.
+It covers one gotcha worth repeating: never `npm install -g pi-web-ui` or the
+`pi` CLI — the image manages those (`PI_WEB_MANAGED=1`), and the copy would be
+shadowed by `/usr/local` anyway.
 
 ### Updates
 
@@ -208,7 +230,8 @@ Commits are classified the usual way: `feat!:`/`BREAKING CHANGE` → major,
 
 ```
 Dockerfile              single-stage image (node:22-bookworm-slim)
-docker-entrypoint.sh    creates the persisted dirs, fixes up PATH, execs the server
+docker-entrypoint.sh    creates the persisted dirs, links skills, fixes PATH, execs the server
+skills/                 agent skills baked into the image (symlinked into the agent dir)
 docker-compose.yml      local build
 compose.ghcr.yaml       published image (Traefik ready)
 .env.example            USERDIR / host-origin / token

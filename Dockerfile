@@ -65,8 +65,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git jq less procps ripgrep \
-      python3 make g++ \
+      python3 python3-pip python3-venv make g++ \
  && rm -rf /var/lib/apt/lists/*
+
+# Debian marks the system Python as "externally managed" (PEP 668), which makes
+# `pip install --user <tool>` refuse outright — and `--user` is precisely the
+# persistent path the bundled skill documents. Drop the guard so it works;
+# venv and pipx behaviour is unchanged.
+RUN rm -f /usr/lib/python3*/EXTERNALLY-MANAGED
 
 # Installed into the image prefix (/usr/local), NOT the persisted /data/npm:
 # a fresh, empty data volume must never leave the container without its app.
@@ -99,6 +105,11 @@ ENV HOME=/data/home \
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Agent skills shipped with the image. They live in /opt (image layer, so an
+# image rebuild updates them) and the entrypoint symlinks each one into
+# ${PI_CODING_AGENT_DIR}/skills, which is where pi discovers global skills.
+COPY skills/ /opt/pi-docker/skills/
 
 LABEL org.opencontainers.image.title="pi-docker" \
       org.opencontainers.image.description="Persistent container for the pi coding agent and its web UI (pi-web-ui)." \
