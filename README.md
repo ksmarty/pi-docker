@@ -105,8 +105,8 @@ The original compose installed the app into `/data/npm` on first boot. On
 startup the entrypoint now **removes those migrated copies automatically**:
 
 ```
-[pi] removing migrated app install from /data/npm (pi-web-ui,
-     @earendil-works/pi-coding-agent) — the image ships both
+[pi-docker] removing stale pi-web-ui from /data/npm/lib/node_modules (the image provides it now)
+[pi-docker] removing dangling /data/npm/bin/pi-web-ui
 ```
 
 That matters because `/data/npm` is now reserved for the tools the agent
@@ -116,6 +116,12 @@ mismatched dependency tree. The removal is deliberately narrow — only those tw
 package directories and their `bin` symlinks. Anything else the agent installed
 into `/data/npm` is left alone. If nothing stale is present, the entrypoint says
 nothing and no `bin` entry is ever deleted.
+
+It is also guarded: the cleanup only runs when the image's own copy is present
+at `/usr/local/bin/pi-web-ui`. Running this entrypoint against a volume where
+`/data/npm` holds the *only* pi-web-ui (an older container, a host shell) leaves
+it alone instead of deleting the installation you depend on. Override the
+location with `PI_WEB_IMAGE_PREFIX` if your build puts the app elsewhere.
 
 No manual cleanup step is required; `docker compose up -d` is enough.
 
@@ -283,7 +289,8 @@ Commits are classified the usual way: `feat!:`/`BREAKING CHANGE` → major,
 
 ```
 Dockerfile              single-stage image (NODE_VERSION, default node:26-bookworm-slim)
-docker-entrypoint.sh    creates the persisted dirs, links skills, fixes PATH, execs the server
+docker-entrypoint.sh    creates the persisted dirs, cleans migrated installs, links skills, fixes PATH, execs the server
+scripts/               shell tests CI runs against the built image (smoke, healthcheck, host guard, cleanup)
 skills/                 agent skills baked into the image (symlinked into the agent dir)
 docker-compose.yml      local build
 compose.ghcr.yaml       published image (Traefik ready)

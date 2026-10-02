@@ -158,7 +158,14 @@ EXPOSE 8787
 #
 # /api/health is deliberately unauthenticated (no secrets, probe-friendly) and
 # responds even when PI_WEB_TOKEN is set.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+#
+# Timings: a cold first boot on an empty volume has to sync the plugin catalog
+# before it binds, which can take a minute. A short --start-period would mark the
+# container unhealthy during that window, and `docker compose up --wait` treats
+# an unhealthy container as a failed start — the same "it never came online"
+# report this healthcheck exists to fix. So: generous start period, frequent
+# probe, and a 5s timeout that still leaves room for the 4s request timeout.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=90s --retries=5 \
   CMD ["node", "-e", "const h=(process.env.PI_WEB_ALLOW_HOSTS||'127.0.0.1').split(',')[0].trim()||'127.0.0.1';const r=require('http').get({host:'127.0.0.1',port:process.env.PI_WEB_PORT||8787,path:'/api/health',headers:{Host:h}},s=>process.exit(s.statusCode===200?0:1));r.on('error',()=>process.exit(1));r.setTimeout(4000,()=>{r.destroy();process.exit(1)});"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

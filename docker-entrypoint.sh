@@ -45,8 +45,14 @@ mkdir -p "${HOME}" "${NPM_CONFIG_PREFIX}" "${PI_CODING_AGENT_DIR}" "${PI_WEB_DAT
 # `npm install -g <tool>` calls land, so it is never wiped — and a real file the
 # user put at ${NPM_CONFIG_PREFIX}/bin/<name> is left alone (only dangling
 # symlinks are collected). Idempotent: a second start finds nothing to do.
+#
+# Guard: the removal only happens when the image's own install is really there.
+# Running this script outside the image (a host shell, another container sharing
+# the volume) then cannot delete the only working pi-web-ui on the box.
 # ---------------------------------------------------------------------------
-if [ -n "${NPM_CONFIG_PREFIX}" ] && [ "${NPM_CONFIG_PREFIX}" != "/" ]; then
+PI_WEB_IMAGE_PREFIX="${PI_WEB_IMAGE_PREFIX:-/usr/local}"
+if [ -x "${PI_WEB_IMAGE_PREFIX}/bin/pi-web-ui" ] &&
+   [ -n "${NPM_CONFIG_PREFIX}" ] && [ "${NPM_CONFIG_PREFIX}" != "/" ]; then
   NPM_LIB="${NPM_CONFIG_PREFIX}/lib/node_modules"
   for pkg in pi-web-ui @earendil-works/pi-coding-agent; do
     if [ -e "${NPM_LIB}/${pkg}" ]; then

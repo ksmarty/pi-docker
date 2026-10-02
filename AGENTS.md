@@ -101,6 +101,12 @@ Rules that keep this working:
   the container.
 - Guard the `/etc/profile.d` write on writability so an unprivileged override
   still works.
+- The migrated-install cleanup must never delete the only install on the box: it
+  runs only when the image's own copy is present
+  (`${PI_WEB_IMAGE_PREFIX:-/usr/local}/bin/pi-web-ui`). Invoking this entrypoint
+  outside the image — a host shell, or a container that shares the volume — has
+  to be a no-op. (This is not theoretical: running it against a live
+  pre-Dockerfile install deletes the running app's files.)
 
 ## Compose conventions (match the sibling repos)
 
@@ -135,6 +141,19 @@ Rules that keep this working:
   reach `healthy`; the host guard must answer the allowed host and refuse
   loopback; and the entrypoint must clean migrated app installs without touching
   the agent's own tools.
+- The image-facing tests live in `scripts/*.sh` and CI pipes each one in with
+  `bash -lc "$(cat scripts/<name>.sh)"` instead of inlining it. Inlining means the
+  script has to survive `docker run … bash -lc '<script>'`, and one single quote
+  inside it closes that outer quoting: the script is silently truncated and its
+  tail arrives as extra `docker` arguments (seen as a bare "exit code 2" with no
+  other clue). A file cannot be mangled that way.
+- Test scripts default to the image layout but must keep their paths overridable
+  (`NPM_CONFIG_PREFIX`, `ENTRYPOINT`, `PI_WEB_IMAGE_PREFIX`), so they can be
+  exercised against a throwaway prefix without touching a real `/data`.
+- On failure a test script prints the container logs, `docker inspect` state and
+  docker's own healthcheck probe output *and* re-emits them as `::error::`
+  annotations. Job logs need repo admin rights over the API; annotations are
+  readable without them, so the reason survives.
 
 ## Commits and releases
 
