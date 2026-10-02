@@ -15,9 +15,16 @@ permissions:
 
 jobs:
   docker:
-    name: Docker build (linux/amd64)
+    name: Build + smoke (node ${{ matrix.node }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    # Both supported Node lines are exercised, because node-pty has no linux
+    # prebuild and must compile from source against whatever Node the base image
+    # ships — a version bump is exactly the change that breaks it silently.
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24, 26]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -38,6 +45,7 @@ jobs:
           build-args: |
             VERSION=ci
             COMMIT=${{ github.sha }}
+            NODE_VERSION=${{ matrix.node }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -49,16 +57,20 @@ jobs:
       - name: Smoke-test the image
         run: |
           set -euo pipefail
-          docker run --rm pi-docker:ci bash -lc '
+          docker run --rm -e EXPECT_NODE='${{ matrix.node }}' pi-docker:ci bash -lc '
             set -euo pipefail
             test -f /etc/profile.d/pi-paths.sh
             test -d /data/npm
             test -d /data/agent
+            test "$(node -p "process.versions.node.split(\".\")[0]")" = "$EXPECT_NODE"
             test "$(command -v pi-web-ui)" = "/usr/local/bin/pi-web-ui"
             test "$(command -v pi)" = "/usr/local/bin/pi"
             pi-web-ui --version
             pi --version
-            node -e "require(\"/usr/local/lib/node_modules/pi-web-ui/node_modules/node-pty\"); console.log(\"node-pty ok\")"
+            node -e "const p=require.resolve('node-pty',{paths:['/usr/local/lib/node_modules/pi-web-ui']});require(p);console.log('node-pty loaded from '+p)"
+            # The bundled skill offers `curl -fsSL ...` recipes for rustup/uv/bun/go,
+            # so curl has to be in the image, not just assumed.
+            curl --version >/dev/null
             # pip install --user is the persistent Python path the bundled skill
             # documents, so the PEP 668 guard must be gone.
             python3 -m pip --version
@@ -70,6 +82,73 @@ jobs:
             test -f /opt/pi-docker/skills/persistent-tool-install/SKILL.md
             test -L /data/agent/skills/persistent-tool-install
             node -e "import(\"/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js\").then((m) => { const r = m.loadSkills({ cwd: \"/workspace\", agentDir: \"/data/agent\", skillPaths: [], includeDefaults: true }); const n = r.skills.map((s) => s.name); if (!n.includes(\"persistent-tool-install\")) { console.error(\"skill not discovered: \" + n + \" diagnostics: \" + JSON.stringify(r.diagnostics)); process.exit(1); } console.log(\"skill discovered: \" + n.join(\",\")); }).catch((e) => { console.error(e); process.exit(1); })"
+          '
+
+      # Regression test for the v0.1.0 outage. pi-web-ui refuses any Host it is
+      # not told about, and with PI_WEB_ALLOW_HOSTS set even 127.0.0.1 is
+      # refused — so the old healthcheck (plain fetch to 127.0.0.1) returned 403
+      # forever, `docker compose up --wait` and friends never saw a healthy
+      # container, and the logs looked perfectly normal. This boots the image in
+      # exactly that configuration and requires it to go healthy on its own.
+      - name: Healthcheck passes under a strict host allow-list
+        run: |
+          set -euo pipefail
+          docker run -d --init --name pi-hc \
+            -e PI_WEB_ALLOW_HOSTS=pi.notato.xyz \
+            -e PI_WEB_ALLOW_ORIGINS=https://pi.notato.xyz \
+            pi-docker:ci
+          status=unknown
+          for _ in $(seq 1 45); do
+            status=$(docker inspect -f "{{.State.Health.Status}}" pi-hc)
+            [ "$status" = "healthy" ] && break
+            sleep 2
+          done
+          docker logs pi-hc
+          docker rm -f pi-hc >/dev/null
+          echo "health status: $status"
+          [ "$status" = "healthy" ] || { echo "FAIL: container never became healthy" >&2; exit 1; }
+
+      # The Host guard is the whole point of the allow-list, so pin the contract
+      # the healthcheck depends on: the allowed host answers, anything else is
+      # refused with 403.
+      - name: Host guard answers the allowed host and refuses others
+        run: |
+          set -euo pipefail
+          docker run -d --init --name pi-hg \
+            -e PI_WEB_ALLOW_HOSTS=pi.notato.xyz \
+            pi-docker:ci
+          for _ in $(seq 1 30); do
+            if docker exec pi-hg node -e 'const r=require("http").get({host:"127.0.0.1",port:8787,path:"/api/health",headers:{Host:"pi.notato.xyz"}},s=>process.exit(s.statusCode===200?0:1));r.on("error",()=>process.exit(1));r.setTimeout(2000,()=>{r.destroy();process.exit(1)});' 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          docker logs pi-hg | head -20
+          docker exec pi-hg node -e 'const r=require("http").get({host:"127.0.0.1",port:8787,path:"/api/health",headers:{Host:"pi.notato.xyz"}},s=>{console.log("allowed host ->",s.statusCode);process.exit(s.statusCode===200?0:1)});r.on("error",e=>{console.error(e.message);process.exit(1)});'
+          docker exec pi-hg node -e 'const r=require("http").get({host:"127.0.0.1",port:8787,path:"/api/health",headers:{Host:"127.0.0.1:8787"}},s=>{console.log("loopback host ->",s.statusCode);process.exit(s.statusCode===403?0:1)});r.on("error",e=>{console.error(e.message);process.exit(1)});'
+          docker rm -f pi-hg >/dev/null
+
+      # The entrypoint has to clean up after the pre-Dockerfile layout, where
+      # pi-web-ui and the pi CLI lived in the persisted npm prefix. Left there,
+      # a stale copy can disagree with the SDK the image was built against, so
+      # the removal is a feature and gets a test.
+      - name: Entrypoint removes migrated installs from /data/npm
+        run: |
+          set -euo pipefail
+          docker run --rm pi-docker:ci bash -lc '
+            set -euo pipefail
+            mkdir -p /data/npm/lib/node_modules/pi-web-ui /data/npm/lib/node_modules/@earendil-works/pi-coding-agent
+            ln -s /data/npm/lib/node_modules/pi-web-ui/nope /data/npm/bin/pi-web-ui
+            /usr/local/bin/docker-entrypoint.sh bash -lc "
+              set -euo pipefail
+              test ! -e /data/npm/lib/node_modules/pi-web-ui
+              test ! -e /data/npm/lib/node_modules/@earendil-works/pi-coding-agent
+              test ! -L /data/npm/bin/pi-web-ui
+              echo migrated installs cleaned
+            "
+            # A tool the agent installed into /data/npm must survive untouched.
+            mkdir -p /data/npm/lib/node_modules/some-user-tool
+            /usr/local/bin/docker-entrypoint.sh bash -lc "test -d /data/npm/lib/node_modules/some-user-tool && echo user tool kept"
           '
 
   compose:

@@ -30,6 +30,41 @@ export PATH="${PI_PATH_PREFIX}:${PATH}"
 # `mkdir -p ""` aborts the whole script under `set -e`.
 mkdir -p "${HOME}" "${NPM_CONFIG_PREFIX}" "${PI_CODING_AGENT_DIR}" "${PI_WEB_DATA_DIR}" "${PI_WEB_CWD}"
 
+# ---------------------------------------------------------------------------
+# Migrated-install cleanup
+# ---------------------------------------------------------------------------
+# A container built from the pre-Dockerfile compose installed pi-web-ui and the
+# pi CLI into ${NPM_CONFIG_PREFIX} — i.e. into the persisted volume. The image
+# owns them now, and leaving those copies behind is worse than dead weight:
+# pi-web-ui picks the *newer* of the installed pi SDK copies, so a stale global
+# one silently makes the running app disagree with the version this image was
+# built and smoke-tested with. Removing them here makes the image the single
+# source of truth on an upgrade, without anyone remembering a manual step.
+#
+# Only those two packages are touched. /data/npm is where the agent's own
+# `npm install -g <tool>` calls land, so it is never wiped — and a real file the
+# user put at ${NPM_CONFIG_PREFIX}/bin/<name> is left alone (only dangling
+# symlinks are collected). Idempotent: a second start finds nothing to do.
+# ---------------------------------------------------------------------------
+if [ -n "${NPM_CONFIG_PREFIX}" ] && [ "${NPM_CONFIG_PREFIX}" != "/" ]; then
+  NPM_LIB="${NPM_CONFIG_PREFIX}/lib/node_modules"
+  for pkg in pi-web-ui @earendil-works/pi-coding-agent; do
+    if [ -e "${NPM_LIB}/${pkg}" ]; then
+      echo "[pi-docker] removing stale ${pkg} from ${NPM_LIB} (the image provides it now)"
+      rm -rf "${NPM_LIB:?}/${pkg}"
+    fi
+  done
+  # An emptied scope dir would otherwise linger as a confusing empty parent.
+  rmdir "${NPM_LIB}/@earendil-works" 2>/dev/null || true
+  for bin in pi-web-ui pi; do
+    link="${NPM_CONFIG_PREFIX}/bin/${bin}"
+    if [ -L "${link}" ] && [ ! -e "${link}" ]; then
+      echo "[pi-docker] removing dangling ${link}"
+      rm -f "${link}"
+    fi
+  done
+fi
+
 # Expose the image's bundled agent skills to pi. They are symlinked, not copied:
 # the image stays the single source of truth (an image rebuild updates them) and
 # the persisted agent dir holds no duplicate. pi's loader follows symlinked
@@ -62,4 +97,19 @@ export PATH="${PI_PATH_PREFIX}:\$PATH"
 EOF
 fi
 
+# A one-line-prefixed summary of what this container actually resolved to. The
+# original report of this image failing was "it never came online, the logs were
+# unhelpful" — the app had started fine and was answering, but the Host guard
+# refused the probe and nothing said so. Printing the effective bind/allow-list
+# makes that readable at a glance.
+PI_WEB_BIN=$(command -v pi-web-ui 2>/dev/null || echo 'NOT FOUND')
+PI_BIN=$(command -v pi 2>/dev/null || echo 'NOT FOUND')
+echo "[pi-docker] pi-web-ui : ${PI_WEB_BIN}"
+echo "[pi-docker] pi CLI    : ${PI_BIN}"
+echo "[pi-docker] data      : ${PI_WEB_DATA_DIR}  agent: ${PI_CODING_AGENT_DIR}  workspace: ${PI_WEB_CWD}"
+if [ -z "${PI_WEB_ALLOW_HOSTS:-}" ]; then
+  echo "[pi-docker] hosts     : unset — loopback and private LAN accepted, public domains 403"
+else
+  echo "[pi-docker] hosts     : strict — only ${PI_WEB_ALLOW_HOSTS}; any other Host gets 403 (this is why an IP:port request looks 'down')"
+fi
 exec "$@"

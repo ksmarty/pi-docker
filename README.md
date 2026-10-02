@@ -16,6 +16,10 @@ docker compose up -d                          # build locally
 
 Then open `http://localhost:8787`.
 
+That works while no host allow-list is set. As soon as `PI_WEB_ALLOW_HOSTS` is
+set, the app serves **only** those hostnames and answers everything else with
+`403 host not allowed` — including `127.0.0.1`. See [Health](#health).
+
 ---
 
 ## The persistence model
@@ -97,18 +101,23 @@ previous first-start install cannot shadow the baked one. `/data/npm` stays on
 
 ### Migrating from the first-start install
 
-The original compose installed pi into `/data/npm` on first boot. That data keeps
-working as-is, but those app copies are now unused and shadowed. Optionally
-reclaim the space — this does **not** touch extra tools you installed:
+The original compose installed the app into `/data/npm` on first boot. On
+startup the entrypoint now **removes those migrated copies automatically**:
 
-```bash
-docker compose down
-sudo rm -rf "$USERDIR/data/pi/data/npm/lib/node_modules/pi-web-ui" \
-            "$USERDIR/data/pi/data/npm/lib/node_modules/@earendil-works" \
-            "$USERDIR/data/pi/data/npm/bin/pi-web-ui" \
-            "$USERDIR/data/pi/data/npm/bin/pi"
-docker compose up -d
 ```
+[pi] removing migrated app install from /data/npm (pi-web-ui,
+     @earendil-works/pi-coding-agent) — the image ships both
+```
+
+That matters because `/data/npm` is now reserved for the tools the agent
+installs; a leftover app copy there would be a second version of pi-web-ui
+sharing an SDK version with the image, which is how you get two servers or a
+mismatched dependency tree. The removal is deliberately narrow — only those two
+package directories and their `bin` symlinks. Anything else the agent installed
+into `/data/npm` is left alone. If nothing stale is present, the entrypoint says
+nothing and no `bin` entry is ever deleted.
+
+No manual cleanup step is required; `docker compose up -d` is enough.
 
 ## Configuration
 
@@ -120,15 +129,20 @@ docker compose up -d
 | `PI_WEB_DATA_DIR` | `/data/home/.pi-web` | UI state, plugins, uploads. |
 | `PI_CODING_AGENT_DIR` | `/data/agent` | pi config, sessions, API keys. |
 | `PI_WEB_MANAGED` | `1` | Managed mode: the in-app updater and plugin-market installs *refuse*, because the image is the source of truth. |
-| `PI_WEB_ALLOW_HOSTS` | *(unset)* | Allow-list of `Host` hostnames for the websocket upgrade, e.g. `pi.example.com`. Unset = no host check. |
+| `PI_WEB_ALLOW_HOSTS` | *(unset)* | Allow-list of `Host` hostnames, e.g. `pi.example.com`. **Setting it turns on strict mode**: every other `Host`, including `127.0.0.1`, is refused with `403 host not allowed`. Unset = loopback and private LAN addresses accepted. |
 | `PI_WEB_ALLOW_ORIGINS` | *(unset)* | Allow-list of `Origin` values for the websocket upgrade, e.g. `https://pi.example.com`. |
 | `PI_WEB_TOKEN` | *(unset)* | If set, the UI requires `/?token=<value>` once, then sets a cookie. |
 | `NPM_CONFIG_PREFIX` | `/data/npm` | Global npm prefix — the persisted tool directory. |
 | `HOME` | `/data/home` | Persisted home for the agent and its tools. |
 
 Behind a reverse proxy (Traefik, Caddy, nginx), set `PI_WEB_ALLOW_HOSTS` and
-`PI_WEB_ALLOW_ORIGINS` to your public hostname/origin or the websocket upgrade
-will be rejected.
+`PI_WEB_ALLOW_ORIGINS` to your public hostname/origin — otherwise the websocket
+upgrade is rejected, and in strict mode HTTP requests are too.
+
+In that setup do **not** publish the port (`-p 8787:8787`). The proxy reaches the
+container over the docker network, and a published port only invites requests
+the app will refuse: `http://<server-ip>:8787` returns a bare 403 that looks like
+the container is down. The compose files leave `ports:` out for this reason.
 
 ### Versions
 
@@ -138,11 +152,17 @@ Both packages are installed at build time and can be pinned:
 docker build \
   --build-arg PI_WEB_UI_VERSION=0.85.0 \
   --build-arg PI_CODING_AGENT_VERSION=0.85.1 \
+  --build-arg NODE_VERSION=26 \
   -t pi-docker .
 ```
 
 Defaults to `latest`. In compose these are `${PI_WEB_UI_VERSION}` /
 `${PI_CODING_AGENT_VERSION}`.
+
+`NODE_VERSION` picks the `node:<major>-bookworm-slim` base and defaults to `26`
+(current LTS); `24` is also supported. Both are built by CI on every change,
+because `node-pty` ships no Linux prebuild and is compiled from source here — a
+Node bump is exactly the change that breaks it silently.
 
 ## Run the published image (GHCR)
 
@@ -173,7 +193,18 @@ docker compose logs -f
 ## Plain `docker run`
 
 ```bash
-docker run -d --init --name pi-web-ui -p 8787:8787 \
+docker run -d --init --name pi-web-ui -p 127.0.0.1:8787:8787 \
+  -v "$PWD/data:/data" \
+  -v "$PWD/workspace:/workspace" \
+  pi-docker
+```
+
+This is the **direct-access** form: no host allow-list, so `localhost` and LAN
+requests are accepted. To put it behind a proxy on a public hostname, drop `-p`
+and set the allow-lists instead:
+
+```bash
+docker run -d --init --name pi-web-ui \
   -v "$PWD/data:/data" \
   -v "$PWD/workspace:/workspace" \
   -e PI_WEB_ALLOW_HOSTS=pi.example.com \
@@ -190,6 +221,18 @@ The image declares a healthcheck against `GET /api/health`:
 
 ```bash
 docker inspect --format '{{.State.Health.Status}}' pi-web-ui
+```
+
+The probe sends a `Host` header taken from the **first entry of
+`PI_WEB_ALLOW_HOSTS`** rather than `127.0.0.1`. Under strict mode the app
+refuses the loopback host, so a plain `127.0.0.1` probe would get 403 forever
+and the container would sit at `unhealthy` while serving perfectly well — that
+was the v0.1.0 bug. The same rule applies to your own checks:
+
+```bash
+# allowed host -> 200, bare loopback -> 403 in strict mode (both expected)
+curl -s -o /dev/null -w 'allowed  %{http_code}\n' -H 'Host: pi.notato.xyz' http://127.0.0.1:8787/api/health
+curl -s -o /dev/null -w 'loopback %{http_code}\n' http://127.0.0.1:8787/api/health
 ```
 
 `/api/health` is intentionally unauthenticated (it exposes no secrets), so it
@@ -212,7 +255,7 @@ Restoring is the same in reverse: unpack so that `data/pi/data` and
 
 | Workflow | Trigger | Does |
 | --- | --- | --- |
-| `.github/workflows/ci.yml` | push to `main`, every PR | Builds the image for `linux/amd64`, smoke-tests that `pi-web-ui`/`pi` are on `PATH` and the CLI runs, validates both compose files. |
+| `.github/workflows/ci.yml` | push to `main`, every PR | Builds the image for `linux/amd64` on **Node 24 and 26**, smoke-tests that `pi-web-ui`/`pi` are on `PATH` and the CLI runs, that `node-pty` loads, that the bundled skill is discoverable, that a strict host allow-list still yields a **healthy** container, that the host guard answers only the allowed host, and that the entrypoint cleans up migrated installs. Validates both compose files. |
 | `.github/workflows/release.yml` | push to `main`, manual dispatch | Computes the next semver tag from conventional commits, builds and pushes a multi-arch (`amd64`/`arm64`) image to GHCR, creates a GitHub Release. |
 
 Commits are classified the usual way: `feat!:`/`BREAKING CHANGE` → major,
@@ -225,11 +268,21 @@ Commits are classified the usual way: `feat!:`/`BREAKING CHANGE` → major,
   (or similar) **and** `chown` the host directories to that uid.
 - The C/C++ toolchain is intentionally kept in the final image so the agent can
   rebuild native modules; this trades some image size for a working `npm i -g`.
+- **The container serves nothing to an unexpected `Host`.** If the UI seems
+  down, check the first lines of `docker logs` — the entrypoint prints the
+  effective bind/allow-list (`[pi-docker] hosts : ...`) — and ask for the
+  allowed hostname:
+
+  ```bash
+  curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: pi.notato.xyz' http://127.0.0.1:8787/
+  ```
+
+  A `403` means the app is up and the host allow-list is doing its job.
 
 ## Repository layout
 
 ```
-Dockerfile              single-stage image (node:22-bookworm-slim)
+Dockerfile              single-stage image (NODE_VERSION, default node:26-bookworm-slim)
 docker-entrypoint.sh    creates the persisted dirs, links skills, fixes PATH, execs the server
 skills/                 agent skills baked into the image (symlinked into the agent dir)
 docker-compose.yml      local build

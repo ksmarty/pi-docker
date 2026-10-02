@@ -7,13 +7,18 @@
 #   docker run -d --init --name pi-web-ui -p 8787:8787 \
 #     -v "$PWD/data:/data" -v "$PWD/workspace:/workspace" pi-docker
 #
+# Publishing the port and reaching it by IP only works when that IP/hostname is
+# acceptable to pi-web-ui's Host guard — set PI_WEB_ALLOW_HOSTS (or leave it
+# unset for loopback/LAN) or the request is refused with 403. Behind a reverse
+# proxy you do not need `-p` at all. See "Host allow-list" below.
+#
 # ---------------------------------------------------------------------------
 # Why this file exists (vs. installing at first start)
 # ---------------------------------------------------------------------------
 #
 # The original compose installed pi-web-ui on first boot, which meant an empty
 # data volume re-downloaded everything (minutes of apt + npm) and an image that
-# was a bare `node:22-bookworm-slim` with no toolchain until it happened.
+# was a bare `node:*-bookworm-slim` with no toolchain until it happened.
 #
 # This Dockerfile bakes pi in at build time instead, so the container starts in
 # seconds. It is single-stage on purpose: the C/C++ toolchain that node-pty
@@ -41,7 +46,14 @@
 # the version the image was built with. /data/npm stays on PATH for extra tools.
 # ---------------------------------------------------------------------------
 
-FROM node:22-bookworm-slim
+# Node 26 is the current LTS line (Node 22, the original base, went to
+# maintenance in 2026). 24 is still supported and is one build arg away:
+#   docker build --build-arg NODE_VERSION=24 .
+# Both are exercised by the CI smoke test, which also proves node-pty still
+# compiles from source against the chosen Node (it has no linux prebuild).
+ARG NODE_VERSION=26
+
+FROM node:${NODE_VERSION}-bookworm-slim
 
 # Tooling versions — override at build time to pin, e.g.
 #   docker build --build-arg PI_WEB_UI_VERSION=0.85.0 .
@@ -122,10 +134,32 @@ VOLUME ["/data"]
 
 EXPOSE 8787
 
+# Host allow-list — read this before "it never came online".
+# ---------------------------------------------------------------------------
+# pi-web-ui rejects any request whose Host header it does not recognise
+# (host-guard; a DNS-rebinding defence). The rule is:
+#
+#   PI_WEB_ALLOW_HOSTS set   -> STRICT: only those hostnames are accepted. The
+#                               loopback/LAN fallback below does NOT apply, so
+#                               http://127.0.0.1:8787 answers 403 "host not
+#                               allowed" — the app is fine, the Host is not.
+#   PI_WEB_ALLOW_HOSTS unset -> loopback and private LAN hosts are accepted;
+#                               a public domain is refused.
+#   PI_WEB_TOKEN set         -> the token is the gate, Host is not checked.
+#
+# Two consequences for this image:
+#   1. The healthcheck below must claim an ALLOWED Host. It connects to
+#      loopback but sends the first PI_WEB_ALLOW_HOSTS entry, falling back to
+#      127.0.0.1. Plain `fetch()` cannot do this — Host is a forbidden header
+#      that undici drops — hence the http.request one-liner.
+#   2. `ports:` in the compose files is not published on purpose: reaching the
+#      container by IP is exactly the case that gets a bare 403. Add the
+#      hostname to PI_WEB_ALLOW_HOSTS if you really need direct access.
+#
 # /api/health is deliberately unauthenticated (no secrets, probe-friendly) and
-# responds even when PI_WEB_TOKEN is set. Node's built-in fetch avoids curl.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PI_WEB_PORT||8787)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+# responds even when PI_WEB_TOKEN is set.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["node", "-e", "const h=(process.env.PI_WEB_ALLOW_HOSTS||'127.0.0.1').split(',')[0].trim()||'127.0.0.1';const r=require('http').get({host:'127.0.0.1',port:process.env.PI_WEB_PORT||8787,path:'/api/health',headers:{Host:h}},s=>process.exit(s.statusCode===200?0:1));r.on('error',()=>process.exit(1));r.setTimeout(4000,()=>{r.destroy();process.exit(1)});"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["pi-web-ui", "--no-browser"]

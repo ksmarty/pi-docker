@@ -109,11 +109,10 @@ npm install -g @earendil-works/pi-coding-agent  # ❌ do not
 
 pi-web-ui and the `pi` CLI are **managed by the image** at `/usr/local`, which
 comes before `/data/npm` on `PATH`, and `PI_WEB_MANAGED=1` makes the in-app
-updater refuse on purpose. A copy installed into `/data/npm` is shadowed and
-inert — it just wastes space and confuses `command -v`. To update either one,
-update the container image (pull or rebuild it). If you see one in
-`/data/npm/lib/node_modules`, it is a leftover from the old first-start install
-and is safe to delete.
+updater refuse on purpose. To update either one, update the container image (pull
+or rebuild it). A copy installed into `/data/npm` would be shadowed and inert —
+and `docker-entrypoint.sh` deletes any it finds there at startup, so installing
+them is wasted work that disappears with the next restart.
 
 ## When the tool must exist for every fresh deployment
 

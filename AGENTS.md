@@ -39,6 +39,12 @@ Any change must keep this true. Concretely:
 - Keep `python3-pip` and the `rm -f /usr/lib/python3*/EXTERNALLY-MANAGED` line:
   without them `pip install --user`, which the bundled skill documents as a
   persistent install path, refuses to run under PEP 668.
+- **Never put the image's own packages in `/data/npm`** — and keep removing them
+  if they are there. The entrypoint deletes a migrated `pi-web-ui` /
+  `@earendil-works/pi-coding-agent` from the persisted prefix on every start
+  (leftovers from the pre-Dockerfile compose). Keep that cleanup *narrow*:
+  `/data/npm` is where the agent's own tools live, so only those two package
+  directories and dangling `bin` symlinks may ever be touched.
 
 ## Bundled skills
 
@@ -68,7 +74,19 @@ Rules that keep this working:
 - The app is installed with an explicit `--global` npm install into the image
   prefix, with the npm cache mounted (`--mount=type=cache,target=/root/.npm`).
 - Version knobs are `ARG`s (`PI_WEB_UI_VERSION`, `PI_CODING_AGENT_VERSION`,
-  `VERSION`, `COMMIT`), defaulting to `latest` / `dev` / `unknown`.
+  `NODE_VERSION`, `VERSION`, `COMMIT`), defaulting to `latest` / `26` / `dev` /
+  `unknown`.
+- `ARG NODE_VERSION` selects the base (`node:${NODE_VERSION}-bookworm-slim`,
+  default `26`, `24` also supported). CI builds both, because `node-pty` has no
+  Linux prebuild and is compiled from source — a Node bump is exactly the change
+  that breaks it silently.
+- The `HEALTHCHECK` must send a `Host` header taken from the first entry of
+  `PI_WEB_ALLOW_HOSTS` (`127.0.0.1` fallback) using `http.request`. pi-web-ui's
+  host guard answers `403 host not allowed` to any Host it does not know — and
+  with `PI_WEB_ALLOW_HOSTS` set that includes `127.0.0.1`. `fetch()` cannot set
+  the header at all (undici drops it), so a loopback probe without it reports
+  `unhealthy` forever while the app serves fine. That was the shipped-in-v0.1.0
+  bug; the strict-mode boot is now a CI regression test.
 - Comment the *why* for anything non-obvious (the persistence model, the
   toolchain, the health endpoint). Comments here are documentation for whoever
   rebuilds this image in two years.
@@ -91,6 +109,9 @@ Rules that keep this working:
   in `build:` vs `image:`.
 - Traefik labels are part of the product: `pi.notato.xyz`, `authentik@file`
   middleware, port `8787`. Leave them in place unless asked otherwise.
+- **Do not publish `8787`.** Traefik reaches the container over the docker
+  network, and a published port only invites the by-IP request the host guard
+  refuses with a bare 403 — which reads as "the container never came online".
 - `init: true` and `restart: unless-stopped` are required.
 - `user: "0:0"` is intentional (see README).
 
@@ -107,9 +128,13 @@ Rules that keep this working:
   `provenance: false`, `sbom: false` and `cache-to: type=gha,mode=min` (the
   `mode=max` export has hung releases before). `BUILDKIT_PROGRESS: plain` keeps
   hangs visible.
-- CI builds `linux/amd64` and must keep the smoke test that proves `pi-web-ui`
-  and `pi` are on `PATH` and run — a plain `docker build` does not catch a broken
-  install.
+- CI builds `linux/amd64` on **both supported Node lines** and must keep the
+  smoke test that proves `pi-web-ui` and `pi` are on `PATH` and run — a plain
+  `docker build` does not catch a broken install. Three regressions are pinned
+  there and should stay: a container booted with a strict host allow-list must
+  reach `healthy`; the host guard must answer the allowed host and refuse
+  loopback; and the entrypoint must clean migrated app installs without touching
+  the agent's own tools.
 
 ## Commits and releases
 
@@ -129,3 +154,8 @@ docker compose -f compose.ghcr.yaml config >/dev/null
 ```
 
 Otherwise rely on CI, and say so rather than claiming a build succeeded.
+
+Without Docker, the host guard can still be exercised against a real pi-web-ui:
+run `PI_WEB_ALLOW_HOSTS=x node <install>/dist/server/index.js` and probe with
+`http.request` + an explicit `Host` header. `fetch()` will not do — undici drops
+the header, so the probe 403s regardless of the server's configuration.

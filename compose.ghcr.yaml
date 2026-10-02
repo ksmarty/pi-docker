@@ -19,14 +19,24 @@ services:
     # Root on purpose: the agent installs system packages (apt) and writes into
     # host bind mounts, which a non-root uid cannot do.
     user: "0:0"
-    ports:
-      - "8787:8787"
+    # No `ports:` on purpose. Traefik reaches this container over the shared
+    # docker network, and publishing 8787 would invite exactly the request that
+    # pi-web-ui refuses: with PI_WEB_ALLOW_HOSTS set it only answers the listed
+    # hostnames, so http://<server-ip>:8787 returns a bare 403 "host not
+    # allowed" and looks like the app never started. If you do want direct
+    # access, add that hostname to PI_WEB_ALLOW_HOSTS (or leave it unset for
+    # loopback/LAN) and add the mapping back yourself.
     environment:
       PI_WEB_HOST: 0.0.0.0
       PI_WEB_MANAGED: 1
       PI_WEB_CWD: /workspace
       # Host/Origin allow-lists — set these when the UI sits behind a reverse
-      # proxy so the websocket upgrade is not rejected.
+      # proxy so the websocket upgrade is not rejected. Leave both unset for
+      # loopback/LAN access.
+      # NOTE: setting PI_WEB_ALLOW_HOSTS switches the app into strict mode —
+      # every other Host header is refused with 403, including 127.0.0.1. The
+      # container's own healthcheck accounts for that; a direct IP:port request
+      # does not.
       PI_WEB_ALLOW_HOSTS: ${PI_WEB_ALLOW_HOSTS:-pi.notato.xyz}
       PI_WEB_ALLOW_ORIGINS: ${PI_WEB_ALLOW_ORIGINS:-https://pi.notato.xyz}
       # Optional shared-secret gate: the browser must open /?token=<value>.

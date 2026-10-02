@@ -14,6 +14,8 @@ services:
         # Pin at build time for a reproducible image, e.g. 0.85.0.
         PI_WEB_UI_VERSION: ${PI_WEB_UI_VERSION:-latest}
         PI_CODING_AGENT_VERSION: ${PI_CODING_AGENT_VERSION:-latest}
+        # Base image Node line: 26 (current LTS) by default, 24 also supported.
+        NODE_VERSION: ${NODE_VERSION:-26}
     image: pi-docker:latest
     container_name: pi-web-ui
     # `init: true` reaps the zombie processes the agent's shell/PTY children
@@ -24,15 +26,24 @@ services:
     # host bind mounts, which a non-root uid cannot do. Drop this only if you
     # also chown the host directories to the uid you switch to.
     user: "0:0"
-    ports:
-      - "8787:8787"
+    # No `ports:` on purpose. Traefik reaches this container over the shared
+    # docker network, and publishing 8787 would invite exactly the request that
+    # pi-web-ui refuses: with PI_WEB_ALLOW_HOSTS set it only answers the listed
+    # hostnames, so http://<server-ip>:8787 returns a bare 403 "host not
+    # allowed" and looks like the app never started. If you do want direct
+    # access, add that hostname to PI_WEB_ALLOW_HOSTS (or leave it unset for
+    # loopback/LAN) and add the mapping back yourself.
     environment:
       PI_WEB_HOST: 0.0.0.0
       PI_WEB_MANAGED: 1
       PI_WEB_CWD: /workspace
       # Host/Origin allow-lists — set these when the UI sits behind a reverse
-      # proxy so the websocket upgrade is not rejected. Leave unset for
-      # direct IP:port access.
+      # proxy so the websocket upgrade is not rejected. Leave both unset for
+      # loopback/LAN access.
+      # NOTE: setting PI_WEB_ALLOW_HOSTS switches the app into strict mode —
+      # every other Host header is refused with 403, including 127.0.0.1. The
+      # container's own healthcheck accounts for that; a direct IP:port request
+      # does not.
       # PI_WEB_ALLOW_HOSTS: pi.example.com
       # PI_WEB_ALLOW_ORIGINS: https://pi.example.com
       # Optional shared-secret gate: the browser must open /?token=<value>.
