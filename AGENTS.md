@@ -145,6 +145,16 @@ Rules that keep this working:
   nothing reads. Shipped in v1.0.0; CI now asserts
   `${HOME}/.local/share/collie/current/bin/collie` is executable to catch it, and
   a restart self-heals a volume seeded by the broken version.
+- **`COLLIE_PLUGIN_ROOT` is the directory holding `package.json` and
+  `herdr-plugin.toml` — `current` inside a binary install, *not* the install root
+  one level above it.** Collie trusts an injected value without checking for its
+  marker (`resolvePluginRoot` returns an absolute value verbatim), so an
+  off-by-one path boots far enough to print the whole banner and then dies on
+  `readFileSync(<root>/package.json)` with `ENOENT` — before the bridge ever binds
+  a port, which reaches the operator only as "unhealthy". Derive it from the
+  marker *after* seeding, inject it only when that marker proves the path, and
+  print the resolved root in the banner. CI asserts the marker files exist and
+  that the bridge is running.
 - **Readiness of herdr's server comes from the socket API** (`herdr api
   snapshot`), never from `herdr session list`. `session list` is a *local*
   command: it reads session directories and exits 0 with `"running": false` when
@@ -219,7 +229,10 @@ Rules that keep this working:
 - On failure a test script prints the container logs, `docker inspect` state and
   docker's own healthcheck probe output *and* re-emits them as `::error::`
   annotations. Job logs need repo admin rights over the API; annotations are
-  readable without them, so the reason survives.
+  readable without them, so the reason survives. They are also capped and sampled,
+  so the reason has to be annotated *before* the context — a dump that puts 25
+  log lines ahead of an `ENOENT` can lose the annotation entirely, which is why
+  the scripts have a `dump_logs()` that greps for the error first.
 - Every test script therefore runs `set -eEuo pipefail` with an `ERR` trap that
   annotates the failing line and command. Most assertions are bare `test` /
   `docker exec` lines that never reach a `fail()` helper and, under plain
