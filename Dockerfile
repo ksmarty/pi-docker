@@ -9,8 +9,8 @@
 #
 # Collie is served on 0.0.0.0:8787 and is meant to sit behind your own reverse
 # proxy with a login in front of it (Traefik + authentik in the compose files).
-# Reaching it by IP only works when that IP/hostname is acceptable to Collie's
-# host guard — see "Hosts and origins" below.
+# Reaching it by IP renders the UI shell, but its API calls are refused unless
+# that IP/hostname is in COLLIE_PUBLIC_HOSTS — see "Hosts and origins" below.
 #
 # ---------------------------------------------------------------------------
 # Why this file exists (vs. installing at first start)
@@ -290,25 +290,29 @@ EXPOSE 8787
 
 # Hosts and origins — read this before "it never came online".
 # ---------------------------------------------------------------------------
-# Collie refuses a request whose Host it does not recognise (a DNS-rebinding
-# defence), and its UI will not load at all unless the origin you reach it on is
-# in COLLIE_ALLOWED_ORIGINS — the docs are blunt about the failure mode: "Without
+# Collie's host allow-list is a DNS-rebinding defence on its **API routes**: a
+# request whose Host is not in COLLIE_PUBLIC_HOSTS gets `403 host not allowed`
+# there (measured on 1.16.2: /api/config, /api/devices, /api/pair). The static
+# shell and /api/health are deliberately exempt, so a by-IP or container-name
+# visit renders the page and then fails on every API call. Separately, the UI
+# will not load at all unless the origin you reach it on is in
+# COLLIE_ALLOWED_ORIGINS — the docs are blunt about that failure mode: "Without
 # this setting, the UI will load as an empty page." Both are set in the compose
 # files. The rule:
 #
-#   COLLIE_PUBLIC_HOSTS set  -> only those hostnames are accepted; a bare
-#                               IP, a container name or a stray Host header is
-#                               refused. The healthcheck below therefore claims
-#                               an ALLOWED host while connecting to loopback.
+#   COLLIE_PUBLIC_HOSTS set  -> those hostnames (plus the exempt routes) are all
+#                               that answer; a bare IP, a container name or a
+#                               stray Host header gets 403 on the API.
 #   COLLIE_PUBLIC_HOSTS unset -> this is NOT an open door either: Collie still
 #                               applies its own default host rules.
 #
 # The healthcheck probes /api/health, which is unauthenticated on purpose (no
-# secrets, probe-friendly) and answers on loopback. It cannot use fetch():
-# Host is a forbidden header that undici silently drops, so the probe would
-# claim the wrong hostname and get refused — that was the shipped-in-v0.1.0 bug,
-# where the app was up and answering while the container reported unhealthy.
-# http.request is used for the same reason it is documented in AGENTS.md.
+# secrets, probe-friendly) and answers on loopback. It claims an ALLOWED host
+# while connecting to loopback — not because the health route needs it today (it
+# is exempt), but so the probe stays correct if that ever tightens. It cannot use
+# fetch(): Host is a forbidden header that undici silently drops, so the probe
+# would test something other than what it claims. http.request is used for the
+# same reason it is documented in AGENTS.md.
 #
 # Timings: Collie binds after it has found the multiplexer socket, and on a cold
 # boot the image is also seeding the app into an empty volume. A short

@@ -119,13 +119,18 @@ Rules that keep this working:
 - Both vendor installers run in one layer with their scratch files removed, so
   no installer script or archive is left in the image, and the `herdr` binary is
   smoke-run at build time.
-- The `HEALTHCHECK` must send a `Host` header taken from the first entry of
-  `COLLIE_PUBLIC_HOSTS` (`127.0.0.1` fallback) using `http.request`. Under a
-  strict host allow-list the loopback host is refused, so a plain loopback probe
-  reports `unhealthy` forever while the app serves fine. `fetch()` cannot set the
-  header at all — undici drops it. That was the shipped-in-v0.2.0 bug; the
-  strict-mode boot is a CI regression test. Give it a long `start-period`: a cold
-  boot syncs the plugin catalog before the server binds.
+- The `HEALTHCHECK` sends a `Host` header taken from the first entry of
+  `COLLIE_PUBLIC_HOSTS` (`127.0.0.1` fallback) using `http.request`. Collie's
+  allow-list guards its **API routes**, not `/api/health` (measured on 1.16.2:
+  `/api/config`, `/api/devices`, `/api/pair` answer `403 host not allowed` to a
+  foreign Host, while the health endpoint and the static shell answer 200), so the
+  header is belt-and-braces — keep it, it has to stay correct if that ever
+  tightens. `fetch()` cannot set the header at all: undici drops it, which is what
+  made the v0.1.0 outage (pi-web-ui refused loopback on every route) invisible.
+  Give it a long `start-period`: a cold boot seeds the app and syncs the plugin
+  catalog before the server binds. `ci-host-guard.sh` pins both the guarded route
+  and the exempt health endpoint — do not move that assertion back onto
+  `/api/health`, it claims a contract Collie never offered.
 - Comment the *why* for anything non-obvious (the persistence model, the
   seeding, the toolchain, the health endpoint). Comments here are documentation
   for whoever rebuilds this image in two years.
@@ -186,8 +191,10 @@ Rules that keep this working:
   middleware, port `8787`. Leave them in place unless asked otherwise, and keep
   them consistent with `COLLIE_PUBLIC_HOSTS` / `COLLIE_ALLOWED_ORIGINS`.
 - **Do not publish `8787`.** Traefik reaches the container over the docker
-  network, and a published port only invites the request the host guard refuses
-  with a bare 403 — which reads as "the container never came online".
+  network. A published port puts the bridge on every interface, and the allow-list
+  only guards the API routes — the static shell and `/api/health` answer any Host,
+  so a by-IP visitor gets a page that renders and then fails every API call. The
+  authentik middleware is the door, not the port mapping.
 - `COLLIE_MUX=herdr` and `COLLIE_TRUSTED_USER_OPTIONAL=1` are both required
   here: the first pins the multiplexer, the second stops Collie demanding a
   trusted login header that authentik never sends.
@@ -265,8 +272,8 @@ docker compose -f compose.ghcr.yaml config >/dev/null
 Otherwise rely on CI, and say so rather than claiming a build succeeded.
 
 Without Docker, the host guard and the health probe can still be exercised
-against a real Collie: run `bash -lc "$(cat scripts/healthcheck-test.sh)"` with
-`SKIP_BOOT=1` and a `COLLIE_DIR` pointing at an extracted release, or start the
-bridge by hand with `COLLIE_PUBLIC_HOSTS=x` and probe with `http.request` plus an
-explicit `Host` header. `fetch()` will not do — undici drops the header, so the
-probe 403s regardless of the server's configuration.
+against a real Collie: start the bridge by hand with `COLLIE_PUBLIC_HOSTS=x` and
+probe with `http.request` plus an explicit `Host` header. `fetch()` will not do —
+undici drops the header, so the probe tests something other than what it claims:
+on `/api/config` it 403s even while sending an allowed host. Assert the guard on a
+guarded route, and remember `/api/health` is exempt on purpose.

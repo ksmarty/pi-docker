@@ -166,7 +166,7 @@ with `PI_IMAGE_PREFIX` if your build puts the app elsewhere.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `COLLIE_PUBLIC_HOSTS` | *(unset)* | Allow-list of hostnames Collie answers on, e.g. `pi.example.com`. Every other `Host` is refused — including a bare IP and the container name — so `http://<server-ip>:8787` looks "down" while the app is fine. |
+| `COLLIE_PUBLIC_HOSTS` | *(unset)* | Allow-list of hostnames Collie's **API routes** answer on, e.g. `pi.example.com`. A request carrying any other `Host` gets `403 host not allowed` there (measured: `/api/config`, `/api/devices`, `/api/pair`). The UI shell and `/api/health` are served to any Host — so a by-IP visit renders the page and then cannot talk to the API, which is why the compose files publish no port. |
 | `COLLIE_ALLOWED_ORIGINS` | *(unset)* | Origins allowed to use the UI, e.g. `https://pi.example.com`. **Without it, behind a proxy, the UI loads as an empty page.** |
 | `COLLIE_PUBLIC_URL` | *(unset)* | Public URL used for generated links (pairing, notifications). |
 | `COLLIE_SKIP_SERVE` | `1` | Do not run `tailscale serve`. The reverse proxy is the only front door (the vendor's deployment "Variant C"). |
@@ -258,17 +258,22 @@ The image declares a healthcheck against `GET /api/health`:
 docker inspect --format '{{.State.Health.Status}}' collie
 ```
 
-The probe connects to loopback but sends a `Host` header taken from the **first
-entry of `COLLIE_PUBLIC_HOSTS`**. Under a strict host allow-list the loopback
-host is refused, so a plain `127.0.0.1` probe would fail forever and the container
-would sit at `unhealthy` while serving perfectly well — that was the v0.1.0 bug,
-and it is why `fetch()` is not used (undici drops a `Host` you set by hand). The
-same rule applies to your own checks:
+The probe connects to loopback and sends a `Host` header taken from the **first
+entry of `COLLIE_PUBLIC_HOSTS`**. Collie's allow-list covers its API routes, not
+the health endpoint — `/api/health` answers on any Host by design — so this
+header is belt-and-braces: it keeps the probe correct if that ever tightens.
+(`fetch()` cannot set it at all — `Host` is a forbidden header and undici drops
+it silently. The v0.1.0 outage was pi-web-ui's guard refusing loopback on *every*
+route, combined with exactly that dropped header.) The same rules apply to your
+own checks:
 
 ```bash
-# allowed host -> 200, a stranger host -> refused (both expected)
-curl -s -o /dev/null -w 'allowed  %{http_code}\n' -H 'Host: pi.notato.xyz' http://127.0.0.1:8787/api/health
-curl -s -o /dev/null -w 'stranger %{http_code}\n' -H 'Host: nope.example'   http://127.0.0.1:8787/api/health
+# an API route: the allowed host is served, a stranger host is refused
+curl -s -o /dev/null -w 'allowed  %{http_code}\n' -H 'Host: pi.notato.xyz' http://127.0.0.1:8787/api/config
+curl -s -o /dev/null -w 'stranger %{http_code}\n' -H 'Host: nope.example'   http://127.0.0.1:8787/api/config
+
+# the health endpoint answers either way — that is what makes it a liveness probe
+curl -s -o /dev/null -w 'health   %{http_code}\n' -H 'Host: nope.example'   http://127.0.0.1:8787/api/health
 ```
 
 `/api/health` is unauthenticated on purpose (it exposes no secrets), so it works
