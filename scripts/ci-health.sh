@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 #
 # Regression test for the v0.1.0 outage, run on the CI runner against the built
-# image. Collie refuses every Host it was not told about, and with
-# COLLIE_PUBLIC_HOSTS set that includes 127.0.0.1 — so a plain probe to
-# 127.0.0.1 (which cannot even set a Host header through fetch(), because undici
-# drops it) fails, the container never looks healthy, and `docker compose up
-# --wait` gives up while the app is serving fine: "it never came online".
+# image. That outage came from pi-web-ui's host guard, which refused every Host it
+# was not told about — including 127.0.0.1 — while fetch() cannot set a Host header
+# at all (undici drops it), so the container never looked healthy and
+# `docker compose up --wait` gave up while the app was serving fine: "it never came
+# online". Collie's guard is narrower (API routes only — see ci-host-guard.sh), but
+# the healthcheck still claims an allowed host, so this pins that a boot with a
+# strict allow-list reaches `healthy` on its own.
 #
 # This boots the image in exactly that configuration and requires it to reach
 # `healthy` on its own. On failure it prints — and annotates — the container

@@ -229,7 +229,7 @@ if [ "${PI_QUIET:-0}" != "1" ]; then
   if [ -z "${COLLIE_PUBLIC_HOSTS:-}" ]; then
     echo "[pi-docker] hosts      : unset — Collie applies its own default host rules"
   else
-    echo "[pi-docker] hosts      : strict — only ${COLLIE_PUBLIC_HOSTS}; any other Host is refused (this is why an IP:port request looks 'down')"
+    echo "[pi-docker] hosts      : strict — API routes answer only ${COLLIE_PUBLIC_HOSTS}; the shell and /api/health answer on any Host"
   fi
   if [ -z "${COLLIE_ALLOWED_ORIGINS:-}" ] && [ -n "${COLLIE_PUBLIC_HOSTS:-}" ]; then
     echo "[pi-docker] WARNING    : COLLIE_ALLOWED_ORIGINS is unset while behind a proxy — the UI will load as an empty page"
