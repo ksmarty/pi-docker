@@ -1,0 +1,22 @@
+# Seed config for herdr, copied to ~/.config/herdr/config.toml by the
+# entrypoint when (and only when) no config exists yet. After that the file is
+# yours — nothing overwrites it — and the image's copy is only relevant again
+# for a fresh volume.
+#
+# A headless server has nobody to answer Herdr's first-run setup, so it is off.
+# Continuing that setup by hand would write exactly this line.
+onboarding = false
+
+# Layout used for panes created while no client is attached — which, in a
+# container, is all of them until you open Collie.
+[server]
+headless_cols = 160
+headless_rows = 48
+
+# Not set, but worth knowing about:
+#   [session]
+#   resume_agents_on_restore = true
+# restores panes from the session snapshot when the server restarts and resumes
+# the agents that were running in them. The default (false) restores the layout
+# only, so a container restart brings the panes back without re-running whatever
+# was in them. Set it in this file if you want your agents back automatically.

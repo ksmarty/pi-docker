@@ -1,23 +1,28 @@
 # pi-docker — build the image locally and run it.
 #
 #   docker compose up -d
+#   docker exec -it collie collie pair      # authorize your phone (8-char code)
 #
 # Prefer the published image? Use compose.ghcr.yaml instead.
 #
 # The two bind mounts are the whole persistence story: everything the agent is
 # or installs lives inside them (see the persistence model in the Dockerfile).
 services:
-  pi-web-ui:
+  collie:
     build:
       context: .
       args:
-        # Pin at build time for a reproducible image, e.g. 0.85.0.
-        PI_WEB_UI_VERSION: ${PI_WEB_UI_VERSION:-latest}
+        # Pin at build time for a reproducible image, e.g. v1.16.2 / 0.9.3.
+        # "latest" uses each vendor's installer, which verifies the release
+        # checksum; an explicit version additionally fails the build if the
+        # installer fetched something else.
+        COLLIE_VERSION: ${COLLIE_VERSION:-latest}
+        HERDR_VERSION: ${HERDR_VERSION:-latest}
         PI_CODING_AGENT_VERSION: ${PI_CODING_AGENT_VERSION:-latest}
         # Base image Node line: 26 (current LTS) by default, 24 also supported.
         NODE_VERSION: ${NODE_VERSION:-26}
     image: pi-docker:latest
-    container_name: pi-web-ui
+    container_name: collie
     # `init: true` reaps the zombie processes the agent's shell/PTY children
     # would otherwise leave behind as PID 1.
     init: true
@@ -27,32 +32,37 @@ services:
     # also chown the host directories to the uid you switch to.
     user: "0:0"
     # No `ports:` on purpose. Traefik reaches this container over the shared
-    # docker network, and publishing 8787 would invite exactly the request that
-    # pi-web-ui refuses: with PI_WEB_ALLOW_HOSTS set it only answers the listed
-    # hostnames, so http://<server-ip>:8787 returns a bare 403 "host not
-    # allowed" and looks like the app never started. If you do want direct
-    # access, add that hostname to PI_WEB_ALLOW_HOSTS (or leave it unset for
-    # loopback/LAN) and add the mapping back yourself.
+    # docker network, and publishing 8787 would invite exactly the request
+    # Collie refuses: COLLIE_PUBLIC_HOSTS puts it in strict mode, so
+    # http://<server-ip>:8787 answers a bare refusal and looks like the app never
+    # started. If you do want direct access, add that hostname to
+    # COLLIE_PUBLIC_HOSTS and add the mapping back yourself.
     environment:
-      PI_WEB_HOST: 0.0.0.0
-      PI_WEB_MANAGED: 1
-      PI_WEB_CWD: /workspace
-      # Host/Origin allow-lists — set these when the UI sits behind a reverse
-      # proxy so the websocket upgrade is not rejected. Leave both unset for
-      # loopback/LAN access.
-      # NOTE: setting PI_WEB_ALLOW_HOSTS switches the app into strict mode —
-      # every other Host header is refused with 403, including 127.0.0.1. The
-      # container's own healthcheck accounts for that; a direct IP:port request
-      # does not.
-      # PI_WEB_ALLOW_HOSTS: pi.example.com
-      # PI_WEB_ALLOW_ORIGINS: https://pi.example.com
-      # Optional shared-secret gate: the browser must open /?token=<value>.
-      # PI_WEB_TOKEN: ${PI_WEB_TOKEN:-}
+      # The reverse proxy is the only front door, so Collie does not run
+      # `tailscale serve` (the vendor's deployment "Variant C").
+      COLLIE_SKIP_SERVE: 1
+      # Host allow-list, and why an IP:port request "does not work": Collie
+      # refuses every Host it does not recognize. Keep hosts/origins in step
+      # with the Traefik rule below.
+      COLLIE_PUBLIC_HOSTS: ${COLLIE_PUBLIC_HOSTS:-pi.notato.xyz}
+      # Without a matching origin the UI loads as an empty page — this is the
+      # single most common way a working Collie looks broken.
+      COLLIE_ALLOWED_ORIGINS: ${COLLIE_ALLOWED_ORIGINS:-https://pi.notato.xyz}
+      COLLIE_PUBLIC_URL: ${COLLIE_PUBLIC_URL:-https://pi.notato.xyz}
+      # Writes are authorized by pairing a device (`docker exec -it collie
+      # collie pair`), not by a login header, so Collie must not insist on a
+      # trusted login it will never see behind authentik.
+      COLLIE_TRUSTED_USER_OPTIONAL: 1
+      # Where the agent's project files are; the panes Collie shows open here.
+      PI_WORKSPACE_DIR: /workspace
+      # The rest of the layout (HOME, PI_CODING_AGENT_DIR, NPM_CONFIG_PREFIX,
+      # COLLIE_DIR, COLLIE_CONFIG_DIR, COLLIE_STATE_DIR, HERDR_INSTALL_DIR,
+      # COLLIE_PORT/HOST, COLLIE_MUX) is set by the image — see the Dockerfile.
     volumes:
-      # HOME + pi config/sessions + npm global prefix + UI state + the pi CLI's
-      # own bin/ all live under here.
+      # HOME + agent config/sessions + npm global prefix + herdr state +
+      # Collie's install root and its self-updates all live under here.
       - ${USERDIR:-.}/data/pi/data:/data
-      # The agent's project files (PI_WEB_CWD).
+      # The agent's project files (PI_WORKSPACE_DIR).
       - ${USERDIR:-.}/data/pi/workspace:/workspace
     labels:
       - traefik.enable=true

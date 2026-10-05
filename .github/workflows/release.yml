@@ -96,9 +96,9 @@ jobs:
     needs: tag
     if: needs.tag.outputs.tag != ''
     runs-on: ubuntu-latest
-    # A multi-arch build compiles node-pty once per architecture (arm64 under
-    # QEMU), so allow generous headroom — but fail loudly rather than hanging
-    # for GitHub's 6h default.
+    # The multi-arch build pulls two prebuilt app binaries and installs the
+    # agent CLI, with the arm64 leg running under QEMU — keep generous headroom,
+    # but fail loudly rather than hanging for GitHub's 6h default.
     timeout-minutes: 45
     permissions:
       contents: write # create the GitHub Release
@@ -136,7 +136,7 @@ jobs:
             type=raw,value=latest
           labels: |
             org.opencontainers.image.title=pi-docker
-            org.opencontainers.image.description=Persistent container for the pi coding agent and its web UI (pi-web-ui).
+            org.opencontainers.image.description=Persistent container for Herdr, the Collie PWA and the pi coding agent.
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.licenses=MIT
 
@@ -151,6 +151,11 @@ jobs:
           build-args: |
             VERSION=${{ needs.tag.outputs.tag }}
             COMMIT=${{ github.sha }}
+            # Releases bake whatever the vendors published at that moment; the
+            # checksum from the release manifest is verified at build time. Pin
+            # these here if you would rather ship a fixed pair.
+            COLLIE_VERSION=latest
+            HERDR_VERSION=latest
           pull: true
           # provenance/sbom export has been known to hang the build; not needed.
           provenance: false

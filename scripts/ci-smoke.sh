@@ -4,6 +4,12 @@
 # container with `bash -lc "$(cat scripts/ci-smoke.sh)"` (see
 # .github/workflows/ci.yml) and passes EXPECT_NODE.
 #
+# The image's own ENTRYPOINT still runs first (the passed command only replaces
+# CMD), so everything the entrypoint prepares — the persisted directories, the
+# seeded apps, the profile.d file, the skill symlinks — is in place by the time
+# this script executes. That is deliberate: this is a test of the real startup
+# path, not of a bare image.
+#
 # It deliberately lives in a file instead of inline in the workflow: an inline
 # script has to survive being nested inside `docker run ... bash -lc '<script>'`,
 # and a single quote in the script then closes that outer quoting — which
@@ -14,63 +20,94 @@ set -euo pipefail
 
 echo "node       : $(node -v)"
 echo "npm        : $(npm -v)"
-echo "pi-web-ui  : $(pi-web-ui --version 2>&1 | tail -1)"
 echo "pi CLI     : $(pi --version 2>&1 | tail -1)"
+echo "collie     : $(collie --version 2>&1 | tail -1 || true)"
+echo "herdr      : $(herdr --version 2>&1 | tail -1)"
 echo "entrypoint : $(command -v docker-entrypoint.sh || echo 'not on PATH (expected)')"
-
-# The entrypoint's state preparation: without these, the web UI's terminal tab
-# and the agent both lose their persisted paths.
-test -f /etc/profile.d/pi-paths.sh
-test -d /data/npm
-test -d /data/agent
 
 # The base image must be the Node line CI asked for. A matrix typo, or an ARG
 # that stopped being forwarded into the Dockerfile, lands here.
 test "$(node -p 'process.versions.node.split(".")[0]')" = "${EXPECT_NODE}"
 
-# The app must be the image's copy, not something from the persisted volume:
-# /usr/local/bin has to win over /data/npm/bin or a stale app can shadow the
+# The entrypoint's state preparation: without these, the panes Collie shows and
+# the agent both lose their persisted paths.
+test -f /etc/profile.d/pi-paths.sh
+test -d /data/npm
+test -d /data/agent
+test -d /workspace
+
+# The pi CLI must be the image's copy, not something from the persisted volume:
+# /usr/local/bin has to win over /data/npm/bin or a stale copy can shadow the
 # version this image was built and tested with.
-test "$(command -v pi-web-ui)" = "/usr/local/bin/pi-web-ui"
 test "$(command -v pi)" = "/usr/local/bin/pi"
+test "$(command -v collie)" = "/usr/local/bin/collie"
 
-pi-web-ui --version >/dev/null
 pi --version >/dev/null
+herdr --version >/dev/null
+collie --help >/dev/null
 
-# node-pty has no Linux prebuild and is compiled from source at build time, so
-# prove it still loads under the Node the base image ships. A version bump is
-# exactly the change that breaks this, and it breaks at runtime, not at build.
-node -e "
-const p = require.resolve('node-pty', { paths: ['/usr/local/lib/node_modules/pi-web-ui'] });
-require(p);
-console.log('node-pty loaded from ' + p);
-"
+# ---------------------------------------------------------------------------
+# The seeded apps
+# ---------------------------------------------------------------------------
+# Herdr and Collie live in the volume, because that is the only place their own
+# updaters can keep working (`herdr update`, `collie update`): an update there
+# survives a restart *and* a container recreate. The image's copy is the seed for
+# an empty volume.
+test -x "${HOME}/.local/share/collie/current/bin/collie"
+test -x "${HOME}/.local/bin/herdr"
+test -f "${HOME}/.config/herdr/config.toml"
+test -x /opt/pi-docker/seed/bin/herdr
+test -x /opt/pi-docker/seed/collie/current/bin/collie
 
-# The bundled skill documents `curl -fsSL ...` recipes (rustup, uv, bun, go), so
-# curl has to be in the image rather than assumed.
+# It has to be a real directory, not a symlink back into the image: a symlinked
+# install root would make every self-update ephemeral, which is the exact failure
+# this layout exists to prevent.
+test ! -L "${HOME}/.local/share/collie"
+case "$(readlink -f "$(command -v collie)")" in
+  "${HOME}"/.local/share/collie/*)
+    echo "collie resolves into the volume: $(readlink -f "$(command -v collie)")"
+    ;;
+  *)
+    echo "collie does not resolve into the persisted volume" >&2
+    exit 1
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# The toolchain and the persistent install paths the bundled skill documents
+# ---------------------------------------------------------------------------
+# The skill tells the agent it can build native modules and `pip install --user`,
+# so both have to be true in the image rather than assumed.
+command -v make g++ python3 >/dev/null
 curl --version >/dev/null
-
-# `pip install --user` is the persistent Python path the same skill documents, so
-# the PEP 668 marker must be gone.
 python3 -m pip --version
 if ls /usr/lib/python3*/EXTERNALLY-MANAGED >/dev/null 2>&1; then
   echo "PEP 668 marker still present — pip install --user would refuse" >&2
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Skills
+# ---------------------------------------------------------------------------
 # Skills are symlinked into the agent dir at startup and must be discoverable by
 # pi's own loader — a file sitting in the image is not proof the agent sees it.
+# `persistent-tool-install` is hand-written in this repo; `herdr` is generated at
+# build time from the installed binary (`herdr --skill`), so this also proves the
+# vendor's skill reached the agent with its frontmatter intact.
 test -f /opt/pi-docker/skills/persistent-tool-install/SKILL.md
 test -L /data/agent/skills/persistent-tool-install
+test -f /opt/pi-docker/skills/herdr/SKILL.md
+test -L /data/agent/skills/herdr
 node -e '
 import("/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js").then((m) => {
   const r = m.loadSkills({ cwd: "/workspace", agentDir: "/data/agent", skillPaths: [], includeDefaults: true });
   const names = r.skills.map((s) => s.name);
-  if (!names.includes("persistent-tool-install")) {
-    console.error("skill not discovered: " + names + " diagnostics: " + JSON.stringify(r.diagnostics));
+  const missing = ["persistent-tool-install", "herdr"].filter((n) => !names.includes(n));
+  if (missing.length) {
+    console.error("skills not discovered: " + missing + " (got: " + names + ") diagnostics: " + JSON.stringify(r.diagnostics));
     process.exit(1);
   }
-  console.log("skill discovered: " + names.join(","));
+  console.log("skills discovered: " + names.join(","));
 }).catch((e) => { console.error(e); process.exit(1); });
 '
 

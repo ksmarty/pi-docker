@@ -18,9 +18,11 @@ jobs:
     name: Build + smoke (node ${{ matrix.node }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Both supported Node lines are exercised, because node-pty has no linux
-    # prebuild and must compile from source against whatever Node the base image
-    # ships — a version bump is exactly the change that breaks it silently.
+    # Two Node lines are built and smoke-tested. Nothing in this image compiles a
+    # native module at build time any more (Collie and herdr ship prebuilt
+    # binaries for each architecture), so this is no longer a compiler check — it
+    # is the cheap proof that the agent CLI, the skill loader and the entrypoint
+    # still work end to end on both supported lines.
     strategy:
       fail-fast: false
       matrix:
@@ -49,11 +51,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # The image is already loaded, so this checks that the baked-in app really
-      # is on PATH and starts — the failure mode a plain build hides. It runs
-      # through the real entrypoint and a login shell, so it also covers the
-      # entrypoint's mkdir/profile.d work and the PATH ordering that keeps a
-      # stale /data/npm copy from shadowing the image's pi-web-ui.
+      # The image is already loaded, so this checks that the baked-in tools really
+      # are on PATH and start, that the apps were seeded into the volume, and that
+      # a fresh volume is complete without any network access — the failure modes
+      # a plain build hides. It runs through the real entrypoint and a login
+      # shell, so it also covers the entrypoint's mkdir/profile.d/skill work and
+      # the PATH ordering that keeps a stale /data/npm copy from shadowing the
+      # image's pi CLI.
       #
       # The test itself lives in scripts/ci-smoke.sh, which is piped in rather
       # than inlined: an inline script has to survive `bash -lc '<script>'`, and
@@ -63,26 +67,26 @@ jobs:
           docker run --rm -e EXPECT_NODE='${{ matrix.node }}' pi-docker:ci \
             bash -lc "$(cat scripts/ci-smoke.sh)"
 
-      # Regression test for the v0.1.0 outage: pi-web-ui refuses any Host it is
-      # not told about, so the old healthcheck (plain fetch to 127.0.0.1)
-      # returned 403 forever and the container never looked healthy while the app
-      # was serving fine. Boots the image in that configuration and requires it
-      # to reach `healthy` on its own, annotating the probe output on failure.
+      # Regression test for the v0.1.0 outage: Collie refuses any Host it is not
+      # told about, so a plain probe to 127.0.0.1 fails and the container never
+      # looked healthy while the app was serving fine. Boots the image in that
+      # configuration, requires it to reach `healthy` on its own, and checks from
+      # inside that the seeded apps and herdr's server are really there.
       - name: Healthcheck passes under a strict host allow-list
         run: bash scripts/ci-health.sh
 
-      # The Host guard is the whole point of the allow-list, so pin the contract
-      # the healthcheck depends on: the allowed host answers, anything else is
-      # refused with 403.
+      # The host allow-list is the whole point of COLLIE_PUBLIC_HOSTS, so pin the
+      # contract the healthcheck depends on: the allowed host is served, an
+      # unknown Host is not.
       - name: Host guard answers the allowed host and refuses others
         run: bash scripts/ci-host-guard.sh
 
-      # The entrypoint has to clean up after the pre-Dockerfile layout, where
-      # pi-web-ui and the pi CLI lived in the persisted npm prefix. Left there,
-      # a stale copy can disagree with the SDK the image was built against, so
-      # the removal is a feature and gets a test — including the guard that stops
-      # it from deleting the only install when there is no image copy to use.
-      - name: Entrypoint removes migrated installs from /data/npm
+      # The entrypoint has to clean up after the pre-Dockerfile layout, where the
+      # old web UI and the pi CLI lived in the persisted npm prefix. Left there,
+      # a stale copy can disagree with the SDK the image was built against, so the
+      # removal is a feature and gets a test — including the guard that stops it
+      # from deleting the only install when there is no image copy to fall back on.
+      - name: Entrypoint removes migrated installs from /data/npm and never reseeds
         run: |
           docker run --rm pi-docker:ci \
             bash -lc "$(cat scripts/ci-migrated-install.sh)"

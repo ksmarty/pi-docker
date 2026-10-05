@@ -1,6 +1,6 @@
 ---
 name: persistent-tool-install
-description: How to install CLI tools and language runtimes inside this pi-docker container so they survive a restart, image rebuild and `docker compose down`. Use whenever you need a tool that is not already installed (npm packages, pip/pipx/uv tools, cargo binaries, go binaries, bun tools, standalone binaries), whenever you would otherwise reach for `apt-get install`, or whenever you need to check whether an installed tool will actually still be there after a restart. Also covers why pi-web-ui and the pi CLI must never be installed this way.
+description: How to install CLI tools and language runtimes inside this pi-docker container so they survive a restart, image rebuild and `docker compose down`. Use whenever you need a tool that is not already installed (npm packages, pip/pipx/uv tools, cargo binaries, go binaries, bun tools, standalone binaries), whenever you would otherwise reach for `apt-get install`, or whenever you need to check whether an installed tool will actually still be there after a restart. Also covers why the pi CLI, herdr and Collie must never be installed this way.
 license: MIT
 ---
 
@@ -31,7 +31,7 @@ You are **root**, so `sudo` is unnecessary (and usually absent).
 | `/data/home/go/bin` | yes | `GOPATH` default under `$HOME` | ✅ restart + recreate |
 | `/data/home/.bun/bin` | yes | `BUN_INSTALL` default under `$HOME` | ✅ restart + recreate |
 | `/data/agent/bin` | yes | `PI_CODING_AGENT_DIR=/data/agent` | ✅ restart + recreate |
-| `/workspace` | no | `PI_WEB_CWD` | ✅ restart + recreate |
+| `/workspace` | no | `PI_WORKSPACE_DIR` | ✅ restart + recreate |
 | `/usr`, `/usr/local`, `/opt` | yes | — | ⚠️ restart only — lost on recreate |
 
 ## Install recipes
@@ -103,16 +103,26 @@ package is genuinely needed for the deployment, it belongs in the repo's
 ## Never install these
 
 ```bash
-npm install -g pi-web-ui                     # ❌ do not
 npm install -g @earendil-works/pi-coding-agent  # ❌ do not
+npm install -g herdr collie collie-cli          # ❌ do not — these own their own install dirs
+herdr update                                    # ✅ the supported update path
+collie update                                   # ✅ the supported update path
 ```
 
-pi-web-ui and the `pi` CLI are **managed by the image** at `/usr/local`, which
-comes before `/data/npm` on `PATH`, and `PI_WEB_MANAGED=1` makes the in-app
-updater refuse on purpose. To update either one, update the container image (pull
-or rebuild it). A copy installed into `/data/npm` would be shadowed and inert —
-and `docker-entrypoint.sh` deletes any it finds there at startup, so installing
-them is wasted work that disappears with the next restart.
+The `pi` CLI is **managed by the image** at `/usr/local`, which comes before
+`/data/npm` on `PATH`. To update it, update the container image (pull or rebuild
+it). A copy installed into `/data/npm` would be shadowed and inert — and
+`docker-entrypoint.sh` deletes any it finds there at startup, so installing it is
+wasted work that disappears with the next restart.
+
+`herdr` and `collie` are **seeded into the volume** from the image on first start
+(`/data/home/.local/bin/herdr` and `/data/home/.local/share/collie`) and update
+themselves in place (`herdr update`, `collie update`, `collie update
+--rollback`). Those updates are persisted, so they survive a restart *and* a
+recreate — but a *manual* copy anywhere else is not the same thing: the
+entrypoint only seeds a missing install, and the `collie` wrapper on `PATH`
+resolves its root from `$COLLIE_DIR`. Reinstalling them by hand over the seeded
+copy is how you end up with two versions and a broken `PATH` resolution.
 
 ## When the tool must exist for every fresh deployment
 
@@ -126,7 +136,7 @@ conventions.
 ## Backups
 
 `/data` is the whole persisted state, so a single archive captures the agent's
-config, sessions, UI state and every tool you installed:
+config, sessions, herdr's panes, Collie's pairing and every tool you installed:
 
 ```bash
 tar czf pi-backup-$(date +%F).tar.gz -C /data .
