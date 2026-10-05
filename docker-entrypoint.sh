@@ -81,7 +81,12 @@ fi
 
 if [ ! -e "${COLLIE_DIR}/current" ] && [ -d "${APP_SEED}/collie/versions" ]; then
   echo "[pi-docker] seeding Collie into ${COLLIE_DIR} (first start)"
-  cp -a "${APP_SEED}/collie" "${COLLIE_DIR}"
+  # The trailing `/.` is load-bearing: "${COLLIE_DIR}" was created by the mkdir -p
+  # above, and `cp -a src dst` with an existing dst copies *into* it — that
+  # yields "${COLLIE_DIR}/collie/versions/...", so "${COLLIE_DIR}/current" never
+  # exists, the shim silently falls back to the image's seed, and `collie
+  # update` writes into a tree nothing reads.
+  cp -a "${APP_SEED}/collie/." "${COLLIE_DIR}/"
   # `current` is a symlink into `versions/`. If the image's copy happened to be
   # absolute, the copy would point back at the image (where an update is
   # ephemeral), so normalise it to a relative link onto the version that is

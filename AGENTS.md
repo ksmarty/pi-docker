@@ -137,6 +137,14 @@ Rules that keep this working:
   write `/etc/profile.d/pi-paths.sh`, start `herdr server` in the background, then
   `exec "$@"` (default `serve` → the Collie bridge).
 - It must stay idempotent and must not install or download anything at startup.
+- Seed with `cp -a "${APP_SEED}/collie/." "${COLLIE_DIR}/"`. The trailing `/.`
+  is load-bearing: the entrypoint `mkdir -p`s every destination first, and
+  `cp -a src dst` where `dst` already exists copies *into* it (`dst/src/...`).
+  That silently leaves a volume with no `${COLLIE_DIR}/current`, so the `collie`
+  shim falls back to the image seed and `collie update` writes into a tree
+  nothing reads. Shipped in v1.0.0; CI now asserts
+  `${HOME}/.local/share/collie/current/bin/collie` is executable to catch it, and
+  a restart self-heals a volume seeded by the broken version.
 - **Readiness of herdr's server comes from the socket API** (`herdr api
   snapshot`), never from `herdr session list`. `session list` is a *local*
   command: it reads session directories and exits 0 with `"running": false` when
