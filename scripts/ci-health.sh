@@ -29,6 +29,15 @@ IMAGE=pi-docker:ci
 
 annotate() { while IFS= read -r line; do printf '::error::%s\n' "${line//%/%25}"; done; }
 
+# The *reason* is annotated ahead of the context: GitHub renders only a handful of
+# annotations and samples them, so a dump that puts 25 context lines before the
+# actual error can arrive with the reason cut off entirely. An ENOENT or a stack
+# trace near the end of the log is the whole point of dumping it.
+dump_logs() {
+  docker logs "${NAME}" 2>&1 | grep -iE 'error|ENOENT|panic|fatal|refused|denied|failed|cannot' | tail -12 | annotate || true
+  docker logs "${NAME}" 2>&1 | tail -6 | annotate || true
+}
+
 cleanup() { docker rm -f "${NAME}" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
@@ -59,7 +68,7 @@ if [ "${status}" != "healthy" ]; then
   echo "::error::container never became healthy (status=${status})"
   docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "${NAME}" 2>/dev/null | annotate || true
   docker inspect -f '{{range .State.Health.Log}}health probe exit={{.ExitCode}} out={{.Output}}{{end}}' "${NAME}" 2>/dev/null | annotate || true
-  docker logs "${NAME}" 2>&1 | tail -25 | annotate || true
+  dump_logs
   exit 1
 fi
 
@@ -72,12 +81,23 @@ fi
 # the log above is already readable.
 fail() {
   echo "::error::$1"
-  docker logs "${NAME}" 2>&1 | tail -25 | annotate || true
+  dump_logs
   exit 1
 }
 
 docker exec "${NAME}" test -x /data/home/.local/share/collie/current/bin/collie \
   || fail "Collie was not seeded into the volume"
+# The bridge only survives startup if COLLIE_PLUGIN_ROOT is Collie's *plugin* root
+# — the directory holding package.json and herdr-plugin.toml, i.e. `current`
+# inside a binary install and not the install root one level above it. Collie
+# trusts an injected value without checking for its marker, so an off-by-one path
+# makes readFileSync(<root>/package.json) throw before the bridge ever binds a
+# port, and the container reports "unhealthy" with the cause one line below the
+# banner. Asserted here so a regression names itself instead of just hanging.
+docker exec "${NAME}" test -f /data/home/.local/share/collie/current/package.json \
+  || fail "Collie's plugin root is missing package.json"
+docker exec "${NAME}" test -f /data/home/.local/share/collie/current/herdr-plugin.toml \
+  || fail "Collie's plugin root is missing herdr-plugin.toml — COLLIE_PLUGIN_ROOT cannot be derived from it"
 docker exec "${NAME}" test -x /data/home/.local/bin/herdr \
   || fail "herdr was not seeded into the volume"
 docker exec "${NAME}" test ! -L /data/home/.local/share/collie \

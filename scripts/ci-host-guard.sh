@@ -24,6 +24,13 @@ FOREIGN=not-the-allowed-host.example
 
 annotate() { while IFS= read -r line; do printf '::error::%s\n' "${line//%/%25}"; done; }
 
+# Reason first, then context — see the note in ci-health.sh: annotations are
+# capped and sampled, so the error line must not sit behind 25 context lines.
+dump_logs() {
+  docker logs "${NAME}" 2>&1 | grep -iE 'error|ENOENT|panic|fatal|refused|denied|failed|cannot' | tail -12 | annotate || true
+  docker logs "${NAME}" 2>&1 | tail -6 | annotate || true
+}
+
 cleanup() { docker rm -f "${NAME}" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
@@ -59,7 +66,7 @@ done
 if [ -z "${ready}" ]; then
   echo "::error::the allowed host never got a 200 from /api/health"
   docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}}' "${NAME}" 2>/dev/null | annotate || true
-  docker logs "${NAME}" 2>&1 | tail -25 | annotate || true
+  dump_logs
   exit 1
 fi
 
@@ -71,7 +78,7 @@ probe "${ALLOWED}" 200
 if ! probe "${FOREIGN}" not200; then
   echo "::error::Collie served a Host that is not in COLLIE_PUBLIC_HOSTS: ${FOREIGN}"
   echo "::error::if Collie no longer validates Host, the healthcheck's Host header and the README both assume it does"
-  docker logs "${NAME}" 2>&1 | tail -15 | annotate || true
+  dump_logs
   exit 1
 fi
 

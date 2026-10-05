@@ -39,9 +39,10 @@ export HERDR_CONFIG_PATH="${HERDR_CONFIG_PATH:-${HOME}/.config/herdr/config.toml
 export COLLIE_DIR="${COLLIE_DIR:-${HOME}/.local/share/collie}"
 export COLLIE_CONFIG_DIR="${COLLIE_CONFIG_DIR:-${HOME}/.config/collie}"
 export COLLIE_STATE_DIR="${COLLIE_STATE_DIR:-${HOME}/.local/state/collie}"
-# Both are what the vendor's systemd unit passes to the bridge process: the
-# install root, and the directory holding .env / config.toml.
-export COLLIE_PLUGIN_ROOT="${COLLIE_PLUGIN_ROOT:-${COLLIE_DIR}}"
+# What the vendor's systemd unit passes to the bridge process: the directory
+# holding .env / config.toml. COLLIE_PLUGIN_ROOT belongs in that list too, but it
+# is NOT set here — it can only be derived once the app is on the volume, and a
+# wrong value is fatal (see the seeding section below).
 export HERDR_PLUGIN_CONFIG_DIR="${HERDR_PLUGIN_CONFIG_DIR:-${COLLIE_CONFIG_DIR}}"
 
 # Canonical search order, prepended to whatever PATH the container arrived with.
@@ -106,6 +107,27 @@ if [ ! -e "${HERDR_CONFIG_PATH}" ] && [ -f "${APP_SEED}/herdr/config.toml" ]; th
   mkdir -p "$(dirname "${HERDR_CONFIG_PATH}")"
   cp "${APP_SEED}/herdr/config.toml" "${HERDR_CONFIG_PATH}"
   echo "[pi-docker] seeded ${HERDR_CONFIG_PATH} (edit it freely; it is never overwritten)"
+fi
+
+# Collie's *plugin* root is the directory holding package.json and
+# herdr-plugin.toml — `current` inside a binary install, or the clone itself for
+# a checkout. It is NOT the install root. Collie trusts an injected value without
+# checking for its marker, so pointing it one level too high is fatal:
+# readFileSync(<root>/package.json) throws, the bridge exits before it binds a
+# port, and the container looks like it never came online at all (the healthcheck
+# just reports "unhealthy", with the cause one line below the banner).
+#
+# So only inject a path the marker proves is right; otherwise leave it unset and
+# let Collie resolve the root itself (exec path -> herdr-plugin.toml), which is
+# what it does for the vendor's own systemd unit.
+if [ -z "${COLLIE_PLUGIN_ROOT:-}" ]; then
+  for candidate in "${COLLIE_DIR}/current" "${COLLIE_DIR}"; do
+    if [ -f "${candidate}/herdr-plugin.toml" ]; then
+      export COLLIE_PLUGIN_ROOT="${candidate}"
+      break
+    fi
+  done
+  unset candidate
 fi
 
 # ---------------------------------------------------------------------------
@@ -180,6 +202,7 @@ export PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR}"
 export PI_WORKSPACE_DIR="${PI_WORKSPACE_DIR}"
 export HERDR_INSTALL_DIR="${HERDR_INSTALL_DIR}"
 export COLLIE_DIR="${COLLIE_DIR}"
+export COLLIE_PLUGIN_ROOT="${COLLIE_PLUGIN_ROOT:-}"
 export COLLIE_CONFIG_DIR="${COLLIE_CONFIG_DIR}"
 export COLLIE_STATE_DIR="${COLLIE_STATE_DIR}"
 export PATH="${PI_PATH_PREFIX}:\$PATH"
@@ -200,6 +223,9 @@ if [ "${PI_QUIET:-0}" != "1" ]; then
   echo "[pi-docker] pi CLI     : $(command -v pi 2>/dev/null || echo 'NOT FOUND')"
   echo "[pi-docker] data       : home ${HOME}  agent ${PI_CODING_AGENT_DIR}  workspace ${PI_WORKSPACE_DIR}"
   echo "[pi-docker] collie bind: ${COLLIE_HOST:-127.0.0.1}:${COLLIE_PORT:-8787}  (mux=${COLLIE_MUX:-auto} instance=${COLLIE_INSTANCE:-default} skip_serve=${COLLIE_SKIP_SERVE:-0})"
+  # Printed because a wrong plugin root is invisible until the bridge dies, and
+  # the line it dies on is far below this banner.
+  echo "[pi-docker] collie root: ${COLLIE_PLUGIN_ROOT:-unset (Collie resolves it from its own path)}"
   if [ -z "${COLLIE_PUBLIC_HOSTS:-}" ]; then
     echo "[pi-docker] hosts      : unset — Collie applies its own default host rules"
   else
