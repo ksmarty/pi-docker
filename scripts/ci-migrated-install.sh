@@ -12,7 +12,13 @@
 # Note that the entrypoint has already run once by the time this script does (it
 # is the image ENTRYPOINT), which is why the guard below passes in CI: the image's
 # /usr/local/bin/collie is really there.
-set -euo pipefail
+#
+# `-E` and the ERR trap below make a bare failing command annotate itself: job
+# logs need admin rights over the repository, so an annotation is the only reason
+# that reaches whoever is debugging.
+set -eEuo pipefail
+
+trap 'rc=$?; echo "::error::ci-migrated-install failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2' ERR
 
 # The paths default to the image layout; they are overridable so this test can
 # also be run by hand (with a throwaway NPM_CONFIG_PREFIX and PI_IMAGE_PREFIX)

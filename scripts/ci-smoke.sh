@@ -16,7 +16,14 @@
 # silently truncates it and hands the tail to docker as extra arguments. That is
 # not a hypothetical: it is exactly how the first version of this test failed
 # with a bare "exit code 2" and no explanation.
-set -euo pipefail
+#
+# `-E` plus the ERR trap is what makes a *bare* failing command explain itself: it
+# re-emits the line and the command as an annotation. That matters because
+# GitHub will not hand out job logs without admin rights over the repository, so
+# the annotation is the only failure channel that survives.
+set -eEuo pipefail
+
+trap 'rc=$?; echo "::error::ci-smoke failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2' ERR
 
 echo "node       : $(node -v)"
 echo "npm        : $(npm -v)"
@@ -63,12 +70,20 @@ test -x /opt/pi-docker/seed/collie/current/bin/collie
 # install root would make every self-update ephemeral, which is the exact failure
 # this layout exists to prevent.
 test ! -L "${HOME}/.local/share/collie"
-case "$(readlink -f "$(command -v collie)")" in
+# What has to be true is that the binary that actually runs lives in the volume,
+# so `collie update` writes somewhere that survives. /usr/local/bin/collie is
+# deliberately NOT a symlink into the volume — it is a stable shim that execs
+# "$COLLIE_DIR/current/bin/collie" at runtime (see the Dockerfile) — so resolving
+# the command name proves nothing about where the install is. Resolve the install
+# root instead. (Asserting the shim itself was a symlink is how this test first
+# failed, with nothing in the job log to say why.)
+resolved="$(readlink -f "${HOME}/.local/share/collie/current/bin/collie")"
+case "${resolved}" in
   "${HOME}"/.local/share/collie/*)
-    echo "collie resolves into the volume: $(readlink -f "$(command -v collie)")"
+    echo "collie runs from the volume: ${resolved}"
     ;;
   *)
-    echo "collie does not resolve into the persisted volume" >&2
+    echo "collie does not run from the persisted volume: ${resolved}" >&2
     exit 1
     ;;
 esac

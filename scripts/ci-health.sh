@@ -15,7 +15,14 @@
 # It also proves the startup path as a whole: the bridge only starts after the
 # entrypoint has seeded Collie and herdr's server has become reachable, so a
 # healthy container means all of that worked.
-set -euo pipefail
+#
+# `-E` and the ERR trap below cover the failures that never reach fail(): a bare
+# `docker exec` assertion under `set -e` would otherwise exit silently, and job
+# logs need admin rights over the repository, so the annotation is the only
+# reason that reaches whoever is debugging.
+set -eEuo pipefail
+
+trap 'rc=$?; echo "::error::ci-health failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2' ERR
 
 NAME=collie-hc
 IMAGE=pi-docker:ci

@@ -212,6 +212,17 @@ Rules that keep this working:
   docker's own healthcheck probe output *and* re-emits them as `::error::`
   annotations. Job logs need repo admin rights over the API; annotations are
   readable without them, so the reason survives.
+- Every test script therefore runs `set -eEuo pipefail` with an `ERR` trap that
+  annotates the failing line and command. Most assertions are bare `test` /
+  `docker exec` lines that never reach a `fail()` helper and, under plain
+  `set -e`, exit silently — that is how the first Collie smoke failure arrived as
+  "exit code 1" with nothing else. `-E` is required, or the trap does not fire
+  inside functions.
+- When you add an assertion, check it asserts the thing you mean. That same smoke
+  test also asserted `command -v collie` was a symlink resolving into the volume,
+  when the image deliberately puts a *shim script* there and the volume
+  resolution happens at exec time — the test was wrong, not the image, and it
+  cost a CI round trip to find out.
 
 ## Commits and releases
 

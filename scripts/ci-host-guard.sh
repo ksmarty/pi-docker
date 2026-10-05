@@ -9,7 +9,13 @@
 # "not 200" rather than a specific code, and prints the code it actually got, so
 # a change in *how* Collie refuses is visible in the log instead of being
 # reported as an unexplained failure.
-set -euo pipefail
+#
+# `-E` and the ERR trap below make a bare failing command annotate itself with
+# the line and the command: job logs need admin rights over the repository, so an
+# annotation is the only reason that reaches whoever is debugging.
+set -eEuo pipefail
+
+trap 'rc=$?; echo "::error::ci-host-guard failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2' ERR
 
 NAME=collie-hg
 IMAGE=pi-docker:ci
