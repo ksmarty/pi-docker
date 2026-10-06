@@ -404,11 +404,17 @@ case "${1:-serve}" in
     # failure both are dumped, so the reason lands in `docker logs`.
     HERDR_SERVER_LOG="${HERDR_CONFIG_DIR}/herdr-server.log"
     herdr_logs() {
+      # $1 is an annotation prefix: pass "::error::" on a fatal path so the reason
+      # is readable without repository admin rights (job logs need them), and
+      # nothing on the non-fatal warning path so a healthy boot stays quiet.
+      # GitHub parses `::error::` lines out of the step's output stream, and a
+      # container's stdout/stderr *is* that stream.
+      local prefix="${1:-}"
       {
         echo "--- ${HERDR_LOG}" && tail -n 20 "${HERDR_LOG}" 2>/dev/null
         echo "--- ${HERDR_SERVER_LOG}" && tail -n 30 "${HERDR_SERVER_LOG}" 2>/dev/null
         echo "--- plugin log (${HERDR_WEB_PLUGIN_ID})" && herdr plugin log "${HERDR_WEB_PLUGIN_ID}" 2>/dev/null | tail -n 30
-      } >&2 || true
+      } 2>/dev/null | sed "s|^|${prefix}|" >&2 || true
     }
 
     echo "[pi-docker] starting herdr server (log: ${HERDR_SERVER_LOG})"
@@ -419,10 +425,16 @@ case "${1:-serve}" in
     trap 'kill -TERM "${herdr_pid}" 2>/dev/null || true' TERM INT QUIT
 
     ready=0
-    for _ in $(seq 1 30); do
+    # 120s, not 30: the healthcheck's start-period is 90s for the same reason —
+    # a cold boot on an empty volume seeds herdr, installs the plugin into the
+    # volume and then brings the plugin's own supervisor up, and on a slow CI
+    # runner that first start is the slowest thing the container ever does. A
+    # budget shorter than the healthcheck's would fail a boot that was going to
+    # succeed.
+    for _ in $(seq 1 120); do
       if ! kill -0 "${herdr_pid}" 2>/dev/null; then
-        echo "[pi-docker] herdr server exited during startup:" >&2
-        herdr_logs
+        echo "::error::[pi-docker] herdr server exited during startup" >&2
+        herdr_logs "::error::"
         exit 1
       fi
       # Readiness must come from the socket API: `herdr api snapshot` exits
@@ -438,8 +450,8 @@ case "${1:-serve}" in
       sleep 1
     done
     if [ "${ready}" != "1" ]; then
-      echo "[pi-docker] herdr server was not reachable after 30s:" >&2
-      herdr_logs
+      echo "::error::[pi-docker] herdr server was not reachable after 120s" >&2
+      herdr_logs "::error::"
       exit 1
     fi
     echo "[pi-docker] herdr server ready"
