@@ -311,10 +311,30 @@ thing — the client turns that into a lock/sign-in screen.
 | send `X-Forwarded-Proto: https` when it terminates TLS | `Origin` says `https://…` while the URL is read as `http://…`, and the same header decides whether the plugin marks its device cookie `Secure` | `/ws` → `403 invalid origin`, or a pairing cookie that an HTTPS browser silently drops — every request then arrives unauthenticated while the shell still loads |
 | pass the WebSocket upgrade for `/ws` | that is the terminal and the roster stream | the UI never leaves "Connecting…" |
 
-Traefik does all four by default (`passHostHeader` defaults to true), which is why
-the shipped labels need nothing extra. The vendor's guide carries Caddy and nginx
-examples; the nginx one matters, because a bare `proxy_pass` gets *none* of the
-four right.
+Traefik forwards `Host` and `X-Forwarded-For` itself, and terminates TLS on its
+`websecure` entrypoint. The fourth row has a trap that cost a live deployment,
+though, and "Traefik handles it" is not true in general:
+
+**Traefik sets `X-Forwarded-Proto` from the scheme of the connection it
+receives, and by default it does not trust an incoming one.** A Cloudflare
+tunnel, a load balancer, or any proxy that terminates TLS *in front of* Traefik
+hands it plain HTTP, so Traefik reports `http` — and `/ws` is refused with `403
+invalid origin` while everything else looks healthy: the page loads, `/api/health`
+is green, the container is healthy, and the UI sits on "reconnecting to herdr web
+ui" with nothing in any log naming the cause. Fix it on one side of the hop:
+
+- **let Traefik trust the upstream** — add
+  `--forwardedHeaders.trustedIPs=<the tunnel's address>` (or
+  `--forwardedHeaders.insecure=true` when nothing but the tunnel can reach
+  Traefik). Cloudflare's `X-Forwarded-Proto: https` is then preserved, and every
+  app behind the tunnel that derives its origin benefits, not just this one; or
+- **point the tunnel at `https://traefik:443`** (TLS verification off), so Traefik
+  terminates TLS itself and reports `https` on its own.
+
+`scripts/ci-web-ui.sh` pins both halves — `403` without the header, `101` with it
+— so this requirement cannot quietly change. The vendor's guide carries Caddy and
+nginx examples; the nginx one matters, because a bare `proxy_pass` gets *none* of
+the four rows right.
 
 ### Forward-auth middleware (authentik, authelia, oauth2-proxy)
 

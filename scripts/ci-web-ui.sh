@@ -24,6 +24,18 @@
 #                                  documents health as exempt), which is what makes
 #                                  the image's HEALTHCHECK work for a locked-down
 #                                  deployment
+#   GET /ws, Origin https + no X-Forwarded-Proto -> 403 (the plugin compares the
+#                                  browser's Origin against the origin it derives
+#                                  from the request, and promotes the scheme only
+#                                  when X-Forwarded-Proto says https)
+#   GET /ws, Origin https + X-Forwarded-Proto: https -> 101 Switching Protocols
+#   GET /ws, no Origin             -> 101 (CLI clients)
+#
+# The /ws rows are the ones that cost a live deployment: the browser sends an
+# https Origin, a TLS-terminating proxy forwards plain http, the upgrade is
+# refused, and the UI sits on "reconnecting to herdr web ui" with nothing in any
+# log to explain it. The requirement is therefore pinned here, and the failure
+# message below says what to change.
 #
 # `-E` and the ERR trap: a bare failing command under `set -e` exits silently, and
 # job logs need admin rights, so the annotation is the only reason that reaches
@@ -35,6 +47,9 @@ trap 'rc=$?; printf "%s\n" "::error::ci-web-ui failed at line ${LINENO}: ${BASH_
 NAME=herdr-web-ui-probe
 IMAGE=pi-docker:ci
 PORT=7317
+# The strictest deployment: a token is set, so every path except /api/health has
+# to authenticate before anything else is even considered.
+TOKEN=ci-token-not-a-real-secret
 
 annotate() { while IFS= read -r line; do printf '::error::%s\n' "${line//%/%25}"; done; }
 
@@ -63,7 +78,7 @@ docker run -d --init --name "${NAME}" \
   -e NPM_CONFIG_PREFIX=/data/npm \
   -e HERDR_WEB_HOST=0.0.0.0 \
   -e HERDR_WEB_PORT="${PORT}" \
-  -e HERDR_WEB_TOKEN=ci-token-not-a-real-secret \
+  -e HERDR_WEB_TOKEN="${TOKEN}" \
   "${IMAGE}"
 
 # probe <host-header-or-empty> <path> -> writes STATUS=/TYPE=/BODY= records
@@ -159,5 +174,53 @@ grep -qi 'json' <<<"$(type_of "${noapi}")" && fail "/health answers JSON — the
 grep -qi 'text/html' <<<"$(type_of "${noapi}")" \
   || fail "/health is neither JSON nor the SPA shell, so the surface is unclear: ${noapi}"
 echo "note: /health is the SPA shell, not an endpoint — do not probe it"
+
+echo "=== GET /ws (the browser's connection) ==="
+# ws_probe <origin|empty> <x-forwarded-proto|empty> -> STATUS=<code> [BODY=...]
+# Built with real newlines rather than "\n" inside a string: the header object is
+# JS source, so a literal backslash-n between properties is a SyntaxError. (Same
+# family as the `${var:+...}` trap documented above.)
+#
+# The bearer token is sent on purpose: with a token configured the auth gate runs
+# *before* the origin check, so without it every case answers 401 and the origin
+# rule — the thing under test — is never reached.
+ws_probe() {
+  local origin="$1" xfp="$2" inner hdr=""
+  [ -n "${origin}" ] && hdr="  'Origin': '${origin}',"$'\n'
+  [ -n "${xfp}" ] && hdr="${hdr}  'X-Forwarded-Proto': '${xfp}',"$'\n'
+  inner="$(cat <<EOF
+const http = require('http');
+const req = http.request({ host: '127.0.0.1', port: ${PORT}, path: '/ws', headers: {
+${hdr}  Host: 'herdr.notato.xyz',
+  Authorization: 'Bearer ${TOKEN}',
+  Upgrade: 'websocket',
+  Connection: 'Upgrade',
+  'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+  'Sec-WebSocket-Version': '13',
+} });
+req.on('upgrade', (res) => { process.stdout.write('STATUS=' + res.statusCode + '\n'); res.socket.destroy(); process.exit(0); });
+req.on('response', (res) => {
+  let b = '';
+  res.on('data', (c) => (b += c));
+  res.on('end', () => process.stdout.write('STATUS=' + res.statusCode + ' BODY=' + b.slice(0, 120) + '\n'));
+});
+req.on('error', (e) => process.stdout.write('ERROR=' + e.message + '\n'));
+req.end();
+EOF
+)"
+  docker exec -i "${NAME}" node -e "${inner}" 2>&1 || true
+}
+
+proxied="$(ws_probe "https://herdr.notato.xyz" "")"; echo "  Origin https, no X-Forwarded-Proto -> ${proxied}"
+grep -q 'STATUS=403' <<<"${proxied}" \
+  || fail "/ws did not refuse an https Origin without X-Forwarded-Proto (got: ${proxied}) — the origin rule changed; re-measure the plugin before trusting this file"
+
+forwarded="$(ws_probe "https://herdr.notato.xyz" "https")"; echo "  Origin https + X-Forwarded-Proto   -> ${forwarded}"
+grep -q 'STATUS=101' <<<"${forwarded}" \
+  || fail "/ws refused the upgrade even with X-Forwarded-Proto: https (got: ${forwarded}) — every browser behind a TLS-terminating proxy is stuck on 'reconnecting to herdr web ui'. Fix the proxy: forward X-Forwarded-Proto: https (Traefik: --forwardedHeaders.trustedIPs=<tunnel ip> or .insecure=true), or point the tunnel at the https entrypoint"
+
+noorigin="$(ws_probe "" "")"; echo "  no Origin (CLI clients)            -> ${noorigin}"
+grep -q 'STATUS=101' <<<"${noorigin}" \
+  || fail "/ws refused a request with no Origin (got: ${noorigin}) — token-authenticated CLI clients would break"
 
 echo "web ui HTTP contract OK"
