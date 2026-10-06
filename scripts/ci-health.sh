@@ -141,4 +141,26 @@ require("http").get({ host: "127.0.0.1", port, path: "/api/health" }, (s) => {
 echo "health body: ${health_body}"
 grep -q '"ok":true' <<<"${health_body}" || fail "/api/health does not report ok:true: ${health_body}"
 
+# A command run inside a *live* container must leave the server alone. The
+# entrypoint runs for `docker exec` too, and a second `herdr server` does not fail
+# politely — it takes the socket over from the running one, and the plugin's
+# supervisor is a child of the server that just lost it, so the web UI stops
+# answering (measured on herdr 0.9.3; the persistence test caught it). The
+# plugin's pid is the marker, because a server restart re-spawns it under a new
+# one.
+plugin_pid() { docker exec "${NAME}" ps -eo pid=,args= 2>/dev/null | awk '/server\/managed\.ts/ { print $1; exit }'; }
+pid_before="$(plugin_pid || true)"
+docker exec "${NAME}" herdr plugin list >/dev/null 2>&1 \
+  || fail "herdr plugin list failed inside the running container"
+sleep 3
+pid_after="$(plugin_pid || true)"
+[ -n "${pid_before}" ] || fail "the web UI's process was not running before the extra command"
+[ "${pid_before}" = "${pid_after}" ] \
+  || fail "a command run inside the container restarted herdr's server (web UI pid ${pid_before} -> ${pid_after:-gone})"
+docker exec "${NAME}" node -e '
+const port = Number(process.env.PORT || 7317);
+require("http").get({ host: "127.0.0.1", port, path: "/api/health" }, (s) => process.exit(s.statusCode === 200 ? 0 : 1))
+  .on("error", () => process.exit(1));
+' || fail "the web UI stopped answering after a command was run in the container"
+
 echo "healthcheck OK"

@@ -383,12 +383,21 @@ if [ "${PI_QUIET:-0}" != "1" ]; then
   fi
 fi
 
-# The herdr server starts for EVERY invocation, not only the default `serve`: the
-# container is a herdr host first, and the tests run other commands in it (a smoke
-# script, a shell) that assert herdr's socket, the plugin registration and the
-# served UI. Starting the server only under `serve` handed those a container with
-# no server at all — which is exactly how it was caught, by a smoke test failing
-# on `herdr api snapshot` while the image itself was fine.
+# The herdr server is *ensured* for EVERY invocation, not only the default `serve`:
+# the container is a herdr host first, and the tests run other commands in it (a
+# smoke script, a shell) that assert herdr's socket, the plugin registration and
+# the served UI. Starting the server only under `serve` handed those a container
+# with no server at all — which is exactly how it was caught, by a smoke test
+# failing on `herdr api snapshot` while the image itself was fine.
+#
+# "Ensured" is the load-bearing word, and getting it wrong cost another round: a
+# second `herdr server` does not fail politely, it takes the socket over from the
+# running one, and the plugin's supervisor — a child of the server that just lost
+# it — dies with it. Measured on herdr 0.9.3: the server log shows a takeover
+# seconds after a live container was `docker exec`'d into, and the web UI stops
+# answering. Because the entrypoint runs for `docker exec` as well, *any* command
+# run inside a running container would have done that to a user. So the socket is
+# asked first, and a server is started only when nothing answers it.
 case "${1:-serve}" in
   serve | *)
     # -----------------------------------------------------------------------
@@ -416,6 +425,27 @@ case "${1:-serve}" in
         echo "--- plugin log (${HERDR_WEB_PLUGIN_ID})" && herdr plugin log "${HERDR_WEB_PLUGIN_ID}" 2>/dev/null | tail -n 30
       } 2>/dev/null | sed "s|^|${prefix}|" >&2 || true
     }
+
+    # Exactly one server. `herdr api snapshot` goes over the socket and exits
+    # non-zero while nothing answers it, which makes it the only correct probe here
+    # (`herdr session list` reads session directories locally and exits 0 with no
+    # server at all).
+    herdr_running() { herdr api snapshot >/dev/null 2>&1; }
+
+    if herdr_running; then
+      echo "[pi-docker] herdr server already running; not starting a second one"
+      # A command — a shell, a test, `herdr plugin list` — runs against the server
+      # that is already there and leaves it alone.
+      if [ "${1:-serve}" != "serve" ]; then
+        exec "$@"
+      fi
+      # `serve` must not exit while the server lives, or the container dies with
+      # it. Wait on the socket instead of on a pid this invocation does not own.
+      while herdr_running; do sleep 2; done
+      echo "::error::[pi-docker] herdr server stopped" >&2
+      herdr_logs "::error::"
+      exit 1
+    fi
 
     echo "[pi-docker] starting herdr server (log: ${HERDR_SERVER_LOG})"
     herdr server >>"${HERDR_LOG}" 2>&1 &
