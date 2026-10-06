@@ -41,13 +41,24 @@ TOOL=cowsay
 annotate() { while IFS= read -r line; do printf '::error::%s\n' "${line//%/%25}"; done; }
 
 dump_logs() {
-  docker logs "${NAME}" 2>&1 | grep -iE 'error|ENOENT|panic|fatal|refused|denied|failed|cannot|EADDRINUSE' | tail -12 | annotate || true
-  docker logs "${NAME}" 2>&1 | tail -6 | annotate || true
-  # When the thing that failed is the web UI, the container's own stdout stops at
-  # "herdr server ready" and the reason lives in the plugin's log or herdr's server
-  # log. Without these the next failure is as opaque as this one was.
-  docker exec "${NAME}" herdr plugin log devswha.herdr-web-ui 2>/dev/null | tail -20 | annotate || true
+  # The entrypoint's own lines are the first thing to look at: they say whether it
+  # seeded, registered, started or attached to a server.
+  docker logs "${NAME}" 2>&1 | grep -E '\[pi-docker\]' | tail -20 | annotate || true
+  docker logs "${NAME}" 2>&1 | grep -iE 'error|ENOENT|panic|fatal|refused|denied|failed|cannot|EADDRINUSE' | tail -10 | annotate || true
   docker exec "${NAME}" tail -n 20 /data/home/.config/herdr/herdr-server.log 2>/dev/null | annotate || true
+  # The plugin's own state and logs. `herdr plugin log` showed nothing when the
+  # plugin never started, so the files themselves are what have to be read.
+  docker exec "${NAME}" bash -lc '
+    ls -la /data/home/.config/herdr-web-ui 2>&1
+    echo "--- log files under the plugin state and checkout:"
+    find /data/home/.config/herdr-web-ui -name "*.log" 2>/dev/null | head -5
+  ' | annotate || true
+  docker exec "${NAME}" herdr plugin list 2>&1 | annotate || true
+  # The decisive line: start the plugin by hand and print exactly what it says.
+  # This runs only after the assertion already failed, so it cannot mask anything.
+  docker exec "${NAME}" herdr plugin start devswha.herdr-web-ui 2>&1 | tail -20 | annotate || true
+  sleep 5
+  docker exec "${NAME}" ps -eo pid=,args= 2>&1 | grep -E 'managed\.ts|supervisor\.ts' | annotate || true
 }
 
 cleanup() {
@@ -159,6 +170,11 @@ docker exec "${NAME}" test -f /data/agent/auth.json
 docker exec "${NAME}" test -f /data/agent/skills/my-own-skill/SKILL.md
 docker exec "${NAME}" test -f /data/home/.local/bin/herdr-update-marker || fail "a change to the seeded herdr was lost across a restart (the entrypoint re-seeded over it)"
 docker exec "${NAME}" bash -lc 'test -f "$(ls -d /data/home/.config/herdr/plugins/github/devswha.herdr-web-ui* | head -1)/CI-UPDATE-MARKER"' || fail "a plugin update was lost across a restart (the entrypoint re-seeded over it)"
+# A restart is the gentle case (SIGTERM, no lost state). If the web UI does not
+# come back here either, then the trigger is not a hard kill leaving something
+# stale — it is that a volume which *already* holds the plugin never gets it
+# started, which is a different bug with a different fix.
+wait_web || fail "the web UI is not serving after a restart"
 echo "restart: ok"
 
 # ---------------------------------------------------------------------------
