@@ -34,9 +34,9 @@ NPM_LIB="${NPM_PREFIX}/lib/node_modules"
 NPM_BIN="${NPM_PREFIX}/bin"
 HERDR_INSTALL_DIR="${HERDR_INSTALL_DIR:-${HOME}/.local/bin}"
 # The checkout is named `<id>-<commit>` (the vendor's own layout), so it is
-globbed rather than spelled out — a hardcoded unhashed path silently pointed at
-a directory that never exists, and the two assertions below then failed for the
-wrong reason.
+# globbed rather than spelled out: a hardcoded unhashed path pointed at a
+# directory that never exists, and the two assertions below then failed for a
+# reason that had nothing to do with what they test.
 PLUGIN_DIR="$(ls -d "${HOME}"/.config/herdr/plugins/github/devswha.herdr-web-ui* 2>/dev/null | head -1)"
 
 seed() {
