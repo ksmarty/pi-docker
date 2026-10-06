@@ -293,6 +293,34 @@ The cost is that anything inside the container can reach the port; here that is
 root and nothing else. If your proxy runs on the host, set `HERDR_WEB_HOST` to
 `127.0.0.1` — but then the UI is unreachable from a sibling Traefik container.
 
+### What the proxy must do (measured, plugin 0.3.50)
+
+The plugin compares the request's `Origin` header against a URL it builds from the
+request's `Host`, and it checks that only where it matters: `GET` requests are let
+through, but the WebSocket at `/ws` — the connection carrying the roster and every
+terminal — is refused with `403 invalid origin` when the two disagree. That gives
+the symptom a precise shape, and it is worth recognising: **the page loads and
+then sits at "Connecting to herdr web ui…" or "Connection error"**, because the
+shell and the reads arrive while the socket never does. A `401` is a different
+thing — the client turns that into a lock/sign-in screen.
+
+| The proxy must | Why | When it does not |
+| --- | --- | --- |
+| keep the browser's `Host` | `Origin` is compared with the URL built from `Host` | `/ws` → `403 invalid origin` |
+| send `X-Forwarded-For` | otherwise a proxied visitor counts as the machine itself | the UI is open to anyone who reaches the proxy, pairing or not |
+| send `X-Forwarded-Proto: https` when it terminates TLS | `Origin` says `https://…` while the URL is read as `http://…` | `/ws` → `403 invalid origin` |
+| pass the WebSocket upgrade for `/ws` | that is the terminal and the roster stream | the UI never leaves "Connecting…" |
+
+Traefik does all four by default (`passHostHeader` defaults to true), which is why
+the shipped labels need nothing extra. The vendor's guide carries Caddy and nginx
+examples; the nginx one matters, because a bare `proxy_pass` gets *none* of the
+four right.
+
+From outside, one line tells the three failure modes apart:
+`GET /api/session` → `200` the proxy is wired up, `401` a token or device pairing
+is required, `502` the proxy is not reaching this container at all — usually a
+`loadbalancer.server.port` still set to the old `8787`.
+
 ## Health
 
 The image declares a healthcheck against `GET /api/health`:
