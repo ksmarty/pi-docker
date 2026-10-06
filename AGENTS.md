@@ -53,6 +53,14 @@ Any change must keep this true. Concretely:
   deletes the pi CLI from `/data/npm` on every start. `/usr/local/bin` stays ahead
   of `/data/npm/bin` on `PATH` so a stale volume copy can never shadow the baked
   one.
+- The docker **client** is the deliberate exception to that rule: it is not an
+  image package, because it is 44 MB plus 32 MB for `docker compose` for a
+  capability only a deployment that mounts `/var/run/docker.sock` can use. It is
+  installed into `/data/npm/bin` instead — persistent, and free for the image.
+  The socket mount itself ships commented out in both compose files: it is
+  root-equivalent host access, and this repo ships the safe default, exactly as
+  `7317` stays unpublished. So a test must never assume a daemon is present;
+  `docker compose config` is the only docker check that works without one.
 - **Never** move `HOME`, `NPM_CONFIG_PREFIX` or `PI_CODING_AGENT_DIR` out of
   `/data` — that silently breaks tool persistence, which is the whole point.
 - Keep `/data/npm/bin` and the `$HOME`-relative tool bins on `PATH`, both in the

@@ -337,6 +337,37 @@ From outside, one line tells the three failure modes apart:
 is required, `502` the proxy is not reaching this container at all — usually a
 `loadbalancer.server.port` still set to the old `8787`.
 
+## Docker access
+
+The container reaches a docker daemon only if you give it one. To let the agent
+build and run images — what this repo's own tests do — uncomment the socket mount
+in the compose file you deploy:
+
+```yaml
+volumes:
+  - /var/run/docker.sock:/var/run/docker.sock
+```
+
+**That is root-equivalent host access.** Anything with this socket can start a
+privileged container and mount the host's filesystem, so the agent is only as
+contained as the gate in front of it (here `authentik@file`). It ships commented
+out for that reason — the same reason `7317` is never published. Enable it if you
+want an agent that can build images; leave it off if you do not.
+
+The client is deliberately **not** baked into the image (44 MB, plus 32 MB for
+`docker compose`, for a capability most deployments never use). It is installed
+into the volume instead, where it survives a restart, a recreate and a rebuild:
+
+```bash
+# once, in the container — picks the newest static client
+V=$(curl -fsSL https://download.docker.com/linux/static/stable/x86_64/ | grep -o 'docker-[0-9.]*' | sort -V | tail -1)
+docker exec pi bash -lc "curl -fsSL https://download.docker.com/linux/static/stable/x86_64/${V}.tgz | tar xz -C /tmp && install -m 0755 /tmp/docker/docker /data/npm/bin/docker"
+```
+
+`docker compose config` needs no daemon at all, which makes it the one useful
+docker check when the socket is absent: it validates these compose files and
+resolves the labels.
+
 ## Health
 
 The image declares a healthcheck against `GET /api/health`:

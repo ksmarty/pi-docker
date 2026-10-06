@@ -52,6 +52,13 @@ services:
       - ${USERDIR:-.}/data/pi/data:/data
       # The agent's project files (PI_WORKSPACE_DIR) — the panes open here.
       - ${USERDIR:-.}/data/pi/workspace:/workspace
+      # Optional, and off by default: hand the container the host's docker daemon,
+      # so the agent can build and run images (the client itself is installed in
+      # the volume — see README "Docker access"). This is root-equivalent host
+      # access: anything that reaches the agent could start a privileged
+      # container and mount the host's filesystem. Uncomment only if you want an
+      # agent with that power.
+      # - /var/run/docker.sock:/var/run/docker.sock
     labels:
       - traefik.enable=true
       - traefik.http.routers.pi.rule=Host(`pi.notato.xyz`)
