@@ -26,7 +26,7 @@
 # job logs need admin rights, so the annotation is the only reason that survives.
 set -eEuo pipefail
 
-trap 'rc=$?; echo "::error::ci-persistence failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2' ERR
+trap 'rc=$?; printf "%s\n" "::error::ci-persistence failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" "ci-persistence FAILED at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})"' ERR
 
 NAME=herdr-web-persist
 IMAGE=pi-docker:ci

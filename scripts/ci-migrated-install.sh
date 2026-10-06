@@ -22,7 +22,7 @@
 # that reaches whoever is debugging.
 set -eEuo pipefail
 
-trap 'rc=$?; echo "::error::ci-migrated-install failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2' ERR
+trap 'rc=$?; printf "%s\n" "::error::ci-migrated-install failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" "ci-migrated-install FAILED at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})"' ERR
 
 # The paths default to the image layout; they are overridable so this test can
 # also be run by hand (with a throwaway NPM_CONFIG_PREFIX and PI_APP_SEED) without
@@ -33,7 +33,11 @@ NPM_PREFIX="${NPM_CONFIG_PREFIX:-/data/npm}"
 NPM_LIB="${NPM_PREFIX}/lib/node_modules"
 NPM_BIN="${NPM_PREFIX}/bin"
 HERDR_INSTALL_DIR="${HERDR_INSTALL_DIR:-${HOME}/.local/bin}"
-PLUGIN_DIR="${HOME}/.config/herdr/plugins/github/devswha.herdr-web-ui"
+# The checkout is named `<id>-<commit>` (the vendor's own layout), so it is
+globbed rather than spelled out — a hardcoded unhashed path silently pointed at
+a directory that never exists, and the two assertions below then failed for the
+wrong reason.
+PLUGIN_DIR="$(ls -d "${HOME}"/.config/herdr/plugins/github/devswha.herdr-web-ui* 2>/dev/null | head -1)"
 
 seed() {
   mkdir -p "${NPM_LIB}/pi-web-ui" "${NPM_LIB}/@earendil-works/pi-coding-agent" \

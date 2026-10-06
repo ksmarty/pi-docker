@@ -27,7 +27,7 @@
 # reason that reaches whoever is debugging.
 set -eEuo pipefail
 
-trap 'rc=$?; echo "::error::ci-health failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2' ERR
+trap 'rc=$?; printf "%s\n" "::error::ci-health failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" "ci-health FAILED at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})"' ERR
 
 NAME=herdr-web-hc
 IMAGE=pi-docker:ci

@@ -30,7 +30,7 @@
 # whoever is debugging.
 set -eEuo pipefail
 
-trap 'rc=$?; echo "::error::ci-web-ui failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2' ERR
+trap 'rc=$?; printf "%s\n" "::error::ci-web-ui failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" "ci-web-ui FAILED at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})"' ERR
 
 NAME=herdr-web-ui-probe
 IMAGE=pi-docker:ci

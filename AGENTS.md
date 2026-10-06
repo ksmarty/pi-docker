@@ -305,13 +305,22 @@ Rules that keep this working:
 - Test scripts default to the image layout but must keep their paths overridable
   (`NPM_CONFIG_PREFIX`, `ENTRYPOINT`, `PI_APP_SEED`, `HERDR_INSTALL_DIR`), so they
   can be exercised against a throwaway prefix without touching a real `/data`.
+  Anything the *vendor* names — the plugin checkout is `<id>-<commit>` — has to be
+  globbed (`ls -d …/devswha.herdr-web-ui*`), never spelled out: a hardcoded
+  unhashed path pointed at a directory that does not exist, and two assertions
+  then failed for a reason that had nothing to do with what they test.
 - On failure a test script prints the container logs, `docker inspect` state and
   docker's own healthcheck probe output *and* re-emits them as `::error::`
   annotations. Job logs need repo admin rights over the API; annotations are
-  readable without them, so the reason survives. They are also capped and sampled,
-  so the reason has to be annotated *before* the context — a dump that puts 25 log
-  lines ahead of an `ENOENT` can lose the annotation entirely, which is why the
-  scripts have a `dump_logs()` that greps for the error first.
+  readable without them, so the reason survives. Three measured rules:
+  the annotation must be written to **stdout** — a `::error::` sent to stderr
+  only never reached the annotations API, which is how a failing test reported
+  nothing but "exit code 1" twice; GitHub caps annotations at **10 per step** and
+  silently drops the rest, so a whole dump travels as *one* multi-line annotation
+  with `%0A` separators (escape `%` first); and the reason has to be annotated
+  *before* the context, because a dump that puts 25 log lines ahead of an `ENOENT`
+  can lose the annotation entirely, which is why the scripts have a `dump_logs()`
+  that greps for the error first.
 - Every test script therefore runs `set -eEuo pipefail` with an `ERR` trap that
   annotates the failing line and command. Most assertions are bare `test` /
   `docker exec` lines that never reach a `fail()` helper and, under plain
