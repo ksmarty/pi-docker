@@ -447,6 +447,25 @@ case "${1:-serve}" in
       exit 1
     fi
 
+    # A lock left behind by the previous container stops this one from ever
+    # starting the web UI, and it is a vendor bug on Linux. The plugin's
+    # supervisor takes `<state>/updates/<checkout+port>/supervisor.lock` and
+    # refuses to run while the pid recorded in it is alive —
+    # "A managed server is already running for this checkout and port."
+    # (server/supervisor.ts). It guards against pid *reuse* on Windows only, so a
+    # recreated container — fresh PID namespace, small sequential pids — nearly
+    # always finds its own herdr server, or another early process, wearing the
+    # dead supervisor's number, and gives up. Clearing the lock is safe here and
+    # only here: this is the path that is about to start a server, so no
+    # supervisor of ours can exist. Nothing else is touched — bridges, pairings,
+    # completions, config and a pending update all stay exactly as they are.
+    web_state="${HERDR_WEB_STATE_DIR:-${HOME}/.config/herdr-web-ui}"
+    for stale_lock in "${web_state}"/updates/*/supervisor.lock; do
+      [ -d "${stale_lock}" ] || continue
+      rm -rf "${stale_lock}" 2>/dev/null || true
+      echo "[pi-docker] cleared a supervisor lock left by the previous container (its pid was reused): ${stale_lock}"
+    done
+
     echo "[pi-docker] starting herdr server (log: ${HERDR_SERVER_LOG})"
     herdr server >>"${HERDR_LOG}" 2>&1 &
     herdr_pid=$!

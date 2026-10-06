@@ -227,6 +227,21 @@ Rules that keep this working:
   because every real test overrides it.
 - Keep the `:-` defaults on every variable; guard the `/etc/profile.d` write on
   writability so an unprivileged override still works.
+- The `serve` path clears a stale plugin **supervisor lock** before starting the
+  server, and must keep doing so. The plugin records its supervisor pid in
+  `<state>/updates/<checkout+port>/supervisor.lock` and refuses to start while
+  that pid is alive; the vendor guards against pid *reuse* on Windows only
+  (`server/supervisor.ts:32`). A recreated container gets a fresh PID namespace
+  with small sequential pids, so the dead supervisor's number is alive again —
+  often as our own herdr server — and the web UI never starts. It reaches the
+  operator as "the container is up but nothing answers", and it cost three CI
+  rounds here because the dump that explained it was dropped by GitHub's
+  10-annotation cap. Clearing the lock is safe precisely there: that is the path
+  that is about to start a server, so no supervisor of ours can exist, and
+  bridges, pairings, completions, config and a pending update are untouched.
+  Verified against the vendor supervisor: the hook fails with `A managed server
+  is already running for this checkout and port.` at `supervisor.ts:43`, and
+  comes up one second after the lock is gone.
 - The migrated-install cleanup must never delete the only install on the box: it
   runs only when the image's own seed is present (`PI_APP_SEED`). Invoking this
   entrypoint outside the image — a host shell, or a container that shares the

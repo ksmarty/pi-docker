@@ -63,11 +63,25 @@ dump_logs() {
     echo "===== end of dump ====="
   } 2>&1 | sed 's/^/    /' || true
 
-  # Annotations: only what names the reason. The error itself is emitted by
-  # fail() before this, so it is always present.
-  docker logs "${NAME}" 2>&1 | grep -E '\[pi-docker\].*(seed|register|repair|start|already|ready|WARNING|error|Error)' | tail -6 | annotate || true
-  docker exec "${NAME}" herdr plugin list 2>&1 | tail -3 | annotate || true
-  docker exec "${NAME}" herdr plugin start devswha.herdr-web-ui 2>&1 | tail -6 | annotate || true
+  # Annotations: ONE multi-line annotation, not many. GitHub caps annotations at
+  # 10 per run and silently drops the rest — a dump whose reason sat on line 11
+  # arrived truncated to its first ten lines, which is what made this failure
+  # unreadable. A single message may carry newlines as %0A, so the whole dump
+  # fits in one annotation and the reason cannot be dropped. `%` is escaped
+  # first, or the %0A separators added afterwards would be escaped too.
+  local dump
+  dump="$({
+    docker logs "${NAME}" 2>&1 | grep -E '\[pi-docker\]' | tail -8
+    echo "--- herdr server log"
+    docker exec "${NAME}" tail -n 25 /data/home/.config/herdr/herdr-server.log 2>/dev/null
+    echo "--- herdr plugin list"
+    docker exec "${NAME}" herdr plugin list 2>&1 | tail -6
+    echo "--- herdr plugin log"
+    docker exec "${NAME}" herdr plugin log devswha.herdr-web-ui 2>&1 | tail -15
+    echo "--- supervisor lock on the volume"
+    docker exec "${NAME}" bash -lc 'find /data/home/.config/herdr-web-ui/updates -maxdepth 2 -name "supervisor.lock" -o -maxdepth 2 -name pid 2>/dev/null | head -10' 2>&1
+  } 2>&1 | tail -60 | tr -d '\r' | sed 's/%/%25/g' | awk 'NR>1{printf "%%0A"} {printf "%s", $0}')"
+  [ -n "${dump}" ] && echo "::error::ci-persistence dump (last 60 lines): ${dump}"
 }
 
 cleanup() {
