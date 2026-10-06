@@ -43,6 +43,11 @@ annotate() { while IFS= read -r line; do printf '::error::%s\n' "${line//%/%25}"
 dump_logs() {
   docker logs "${NAME}" 2>&1 | grep -iE 'error|ENOENT|panic|fatal|refused|denied|failed|cannot|EADDRINUSE' | tail -12 | annotate || true
   docker logs "${NAME}" 2>&1 | tail -6 | annotate || true
+  # When the thing that failed is the web UI, the container's own stdout stops at
+  # "herdr server ready" and the reason lives in the plugin's log or herdr's server
+  # log. Without these the next failure is as opaque as this one was.
+  docker exec "${NAME}" herdr plugin log devswha.herdr-web-ui 2>/dev/null | tail -20 | annotate || true
+  docker exec "${NAME}" tail -n 20 /data/home/.config/herdr/herdr-server.log 2>/dev/null | annotate || true
 }
 
 cleanup() {
@@ -82,6 +87,22 @@ wait_server() {
     sleep 2
   done
   fail "herdr's server did not come up after a (re)start"
+}
+
+# herdr's socket answering is NOT the web UI being up: the plugin is started by
+# herdr's own startup hook, a moment later. Polling the plugin's own health
+# endpoint is the only signal that means what this test claims to check — the
+# single-shot probe that used to be here raced the plugin's supervisor and failed
+# a stack that was merely still starting.
+wait_web() {
+  local i
+  for i in $(seq 1 30); do
+    if docker exec "${NAME}" node -e 'require("http").get({host:"127.0.0.1",port:Number(process.env.PORT||7317),path:"/api/health"},(s)=>{process.exit(s.statusCode===200?0:1)}).on("error",()=>process.exit(1))' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
 }
 
 echo "=== boot 1: fresh volume, install an agent tool and write state ==="
@@ -174,7 +195,6 @@ docker exec "${NAME}" bash -lc 'test -f "$(ls -d /data/home/.config/herdr/plugin
 
 # And the container is still a working stack afterwards, not merely a volume with
 # files in it: the plugin must have been repaired to the volume and be serving.
-docker exec "${NAME}" node -e 'require("http").get({host:"127.0.0.1",port:Number(process.env.PORT||7317),path:"/api/health"},(s)=>{process.exit(s.statusCode===200?0:1)}).on("error",()=>process.exit(1))' \
-  || fail "the web UI is not serving after a recreate"
+wait_web || fail "the web UI is not serving after a recreate (waited 60s)"
 
 echo "persistence OK"
