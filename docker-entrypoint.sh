@@ -383,8 +383,14 @@ if [ "${PI_QUIET:-0}" != "1" ]; then
   fi
 fi
 
+# The herdr server starts for EVERY invocation, not only the default `serve`: the
+# container is a herdr host first, and the tests run other commands in it (a smoke
+# script, a shell) that assert herdr's socket, the plugin registration and the
+# served UI. Starting the server only under `serve` handed those a container with
+# no server at all — which is exactly how it was caught, by a smoke test failing
+# on `herdr api snapshot` while the image itself was fine.
 case "${1:-serve}" in
-  serve)
+  serve | *)
     # -----------------------------------------------------------------------
     # Herdr runs as the container's main process; the web UI is a plugin that
     # herdr's own startup hook starts, so nothing here runs the UI directly.
@@ -457,11 +463,14 @@ case "${1:-serve}" in
       herdr_logs
     fi
 
-    # Supervise: the container lives exactly as long as the server does. The
-    # plugin's own stop/start actions restart the UI without touching this.
-    wait "${herdr_pid}"
-    ;;
-  *)
-    exec "$@"
+    # On the default `serve` the container lives exactly as long as the server
+    # does; the plugin's own stop/start actions restart the UI without touching
+    # this. Any other command — a test, `docker run … bash` — gets the server as a
+    # background child and decides for itself when the container exits.
+    if [ "${1:-serve}" = "serve" ]; then
+      wait "${herdr_pid}"
+    else
+      exec "$@"
+    fi
     ;;
 esac

@@ -71,7 +71,17 @@ herdr --version >/dev/null
 # server is really listening. `herdr session list --json` would NOT test this: it
 # is a local command that exits 0 with `"running": false` when nothing is up, so
 # it passes against a container whose server has died.
-herdr api snapshot >/dev/null
+#
+# The probe's own output is annotated when it fails: "exit 1" on this line was
+# exactly how a real regression arrived (the server was only started under the
+# default `serve`, so a container running this script had none), and the reason
+# was one grep away the whole time.
+if ! snapshot="$(herdr api snapshot 2>&1)"; then
+  echo "::error::herdr's socket API is not reachable: ${snapshot}"
+  echo "::error::herdr-server.log tail: $(tail -n 6 "${HOME}/.config/herdr/herdr-server.log" 2>/dev/null | tr '\n' ' ')"
+  echo "::error::herdr processes: $(ps -eo pid=,args= 2>/dev/null | grep -c '[h]erdr') running"
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # The web UI plugin: installed into the volume, registered, enabled, configured

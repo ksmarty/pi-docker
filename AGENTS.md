@@ -218,6 +218,13 @@ Rules that keep this working:
   symlink skills, export paths, write `/etc/profile.d/pi-paths.sh`, start
   `herdr server`, wait for the socket, then `exec "$@"` (default `serve`). It must
   stay idempotent and must not install or download anything at startup.
+- That preparation runs for **every** command, not only the default `serve`. The
+  container is a herdr host first, and CI runs other commands in it (a smoke
+  script, a shell) that assert the socket, the plugin registration and the served
+  UI. Gating the server on `serve` handed those a container with no server at all,
+  and it surfaced as a bare `exit 1` on `herdr api snapshot` in the smoke test
+  while the image itself was fine — the default CMD is the *least* tested path,
+  because every real test overrides it.
 - Keep the `:-` defaults on every variable; guard the `/etc/profile.d` write on
   writability so an unprivileged override still works.
 - The migrated-install cleanup must never delete the only install on the box: it
