@@ -102,10 +102,14 @@ echo "key-marker" > /data/agent/auth.json
 
 # A change inside the seeded apps, standing in for `herdr update` /
 # `herdr plugin update` / editing the plugin env. It must survive.
+# The checkout directory carries the installed commit in its name
+# (`…-210f619d6b7b`), so it is globbed: the literal name does not exist.
 docker exec "${NAME}" bash -lc '
 set -e
+PDIR="$(ls -d /data/home/.config/herdr/plugins/github/devswha.herdr-web-ui* | head -1)"
+test -d "$PDIR"
 echo "updated-by-ci" > /data/home/.local/bin/herdr-update-marker
-echo "plugin-updated" > /data/home/.config/herdr/plugins/github/devswha.herdr-web-ui/CI-UPDATE-MARKER
+echo "plugin-updated" > "$PDIR/CI-UPDATE-MARKER"
 '
 
 # ---------------------------------------------------------------------------
@@ -121,7 +125,7 @@ docker exec "${NAME}" test -f /workspace/ci-project-file
 docker exec "${NAME}" test -f /data/agent/auth.json
 docker exec "${NAME}" test -f /data/agent/skills/my-own-skill/SKILL.md
 docker exec "${NAME}" test -f /data/home/.local/bin/herdr-update-marker || fail "a change to the seeded herdr was lost across a restart (the entrypoint re-seeded over it)"
-docker exec "${NAME}" test -f /data/home/.config/herdr/plugins/github/devswha.herdr-web-ui/CI-UPDATE-MARKER || fail "a plugin update was lost across a restart (the entrypoint re-seeded over it)"
+docker exec "${NAME}" bash -lc 'test -f "$(ls -d /data/home/.config/herdr/plugins/github/devswha.herdr-web-ui* | head -1)/CI-UPDATE-MARKER"' || fail "a plugin update was lost across a restart (the entrypoint re-seeded over it)"
 echo "restart: ok"
 
 # ---------------------------------------------------------------------------
@@ -153,7 +157,7 @@ docker exec "${NAME}" test -L /data/agent/skills/persistent-tool-install \
   || fail "a bundled skill is no longer symlinked after a recreate"
 docker exec "${NAME}" test -f /data/home/.local/bin/herdr-update-marker \
   || fail "a change to the seeded herdr was lost across a recreate (seeded over the volume)"
-docker exec "${NAME}" test -f /data/home/.config/herdr/plugins/github/devswha.herdr-web-ui/CI-UPDATE-MARKER \
+docker exec "${NAME}" bash -lc 'test -f "$(ls -d /data/home/.config/herdr/plugins/github/devswha.herdr-web-ui* | head -1)/CI-UPDATE-MARKER"' \
   || fail "a plugin update was lost across a recreate (seeded over the volume)"
 
 # And the container is still a working stack afterwards, not merely a volume with

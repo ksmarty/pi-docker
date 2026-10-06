@@ -117,13 +117,17 @@ docker exec "${NAME}" test ! -L /data/home/.local/share/herdr \
 
 # The plugin must be installed *into the volume* and started from there. A plugin
 # served out of the image would boot fine and then lose every update on restart.
-docker exec "${NAME}" test -f /data/home/.config/herdr/plugins/github/devswha.herdr-web-ui/plugin/entry.js \
+# herdr names the checkout directory after the installed commit
+# (`…/devswha.herdr-web-ui-210f619d6b7b`), so it is resolved rather than written
+# out: the literal path does not exist, and neither does `plugin/entry.js` — the
+# server herdr runs is `server/managed.ts`.
+docker exec "${NAME}" bash -lc 'test -d "$(ls -d /data/home/.config/herdr/plugins/github/devswha.herdr-web-ui* | head -1)"' \
   || fail "the web UI plugin was not seeded into the volume"
 procs="$(docker exec "${NAME}" ps -eo pid=,args= || true)"
 echo "${procs}"
 # Captured into a variable on purpose: `ps | grep -q` would fail under
 # `set -o pipefail` as soon as grep exits on the first match and ps gets SIGPIPE.
-grep -q 'entry\.js' <<<"${procs}" \
+grep -q 'server/managed\.ts' <<<"${procs}" \
   || fail "no plugin process is running in the container"
 
 # The ui must be serving from that volume copy, not from /opt/pi-docker/seed: the

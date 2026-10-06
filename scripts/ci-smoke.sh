@@ -23,7 +23,24 @@
 # the annotation is the only failure channel that survives.
 set -eEuo pipefail
 
-trap 'rc=$?; echo "::error::ci-smoke failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2' ERR
+# The reason has to reach *stdout* as a plain line, not only as an annotation: the
+# runner lifts `::error::` lines out of the log into the annotations panel, and a
+# failure that existed only as an annotation was invisible from here — the panel
+# showed nothing but GitHub's own "Process completed with exit code 1".
+trap 'rc=$?; printf "%s\n" "::error::ci-smoke failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" "ci-smoke FAILED at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})"' ERR
+
+# Assertions go through this so the log says what was being checked when it
+# stopped. Bare `test` lines are silent by design, and that is how a wrong path in
+# this very file cost a full CI round trip to find.
+check() {
+  local label="$1"; shift
+  if "$@"; then
+    echo "  ok   ${label}"
+  else
+    echo "  FAIL ${label} (${*})"
+    exit 1
+  fi
+}
 
 echo "node       : $(node -v)"
 echo "npm        : $(npm -v)"
@@ -38,17 +55,17 @@ test "$(node -p 'process.versions.node.split(".")[0]')" = "${EXPECT_NODE}"
 
 # The entrypoint's state preparation: without these, the panes herdr shows and
 # the agent both lose their persisted paths.
-test -f /etc/profile.d/pi-paths.sh
-test -d /data/npm
-test -d /data/agent
-test -d /workspace
+check "/etc/profile.d/pi-paths.sh is written" test -f /etc/profile.d/pi-paths.sh
+check "/data/npm exists" test -d /data/npm
+check "/data/agent exists" test -d /data/agent
+check "/workspace exists" test -d /workspace
 
 # The pi CLI must be the image's copy, not something from the persisted volume:
 # /usr/local/bin has to win over /data/npm/bin or a stale copy can shadow the
 # version this image was built and tested with. Same for the toolchain, which is
 # a feature of the runtime and not a build-time nicety.
-test "$(command -v pi)" = "/usr/local/bin/pi"
-test "$(command -v bun)" = "/usr/local/bin/bun"
+check "pi resolves to the image copy" test "$(command -v pi)" = "/usr/local/bin/pi"
+check "bun resolves to the image copy" test "$(command -v bun)" = "/usr/local/bin/bun"
 pi --version >/dev/null
 bun --version >/dev/null
 
@@ -61,9 +78,9 @@ bun --version >/dev/null
 # for an empty volume, and reinstating it over the volume copy on every start
 # would silently roll back `herdr update` — so the seed is asserted to exist and
 # the runtime copy is asserted to be the one on PATH.
-test -x /opt/pi-docker/seed/bin/herdr
-test -x "${HOME}/.local/bin/herdr"
-test "$(command -v herdr)" = "${HOME}/.local/bin/herdr"
+check "the image's herdr seed exists" test -x /opt/pi-docker/seed/bin/herdr
+check "herdr was seeded into the volume" test -x "${HOME}/.local/bin/herdr"
+check "the volume's herdr is the one on PATH" test "$(command -v herdr)" = "${HOME}/.local/bin/herdr"
 herdr --version >/dev/null
 # herdr's server is the multiplexer the UI mirrors; the entrypoint starts it
 # before the plugin, so by now the socket API must answer. `herdr api snapshot`
@@ -91,16 +108,23 @@ fi
 # dependencies are in the volume (seeded by the entrypoint, so `herdr plugin
 # update` persists), the registry entry points at the volume, and the plugin is
 # enabled there.
-PLUGIN_DIR="${HOME}/.config/herdr/plugins/github/devswha.herdr-web-ui"
-test -f "${PLUGIN_DIR}/package.json"
-test -f "${PLUGIN_DIR}/herdr-plugin.toml"
-test -f "${PLUGIN_DIR}/plugin/entry.js"
-test -d "${PLUGIN_DIR}/node_modules"
-test -f "${HOME}/.config/herdr/plugins.json"
-# A real directory, not a symlink back into the image: a symlinked checkout would
-# make `herdr plugin update` write somewhere that a restart throws away.
-test ! -L "${PLUGIN_DIR}"
-test ! -L "${HOME}/.config/herdr/plugins"
+PLUGIN_DIR="$(ls -d "${HOME}"/.config/herdr/plugins/github/devswha.herdr-web-ui* 2>/dev/null | head -1)"
+# herdr appends the installed commit to the checkout directory
+# (`…/devswha.herdr-web-ui-210f619d6b7b`), so the path is globbed instead of
+# written out: the literal path is what this file asserted first, and it does not
+# exist. The registry block below pins the exact paths herdr recorded.
+check "the plugin checkout was seeded into the volume" test -n "${PLUGIN_DIR}"
+check "the checkout is a directory" test -d "${PLUGIN_DIR}"
+check "the checkout is not a symlink into the image" test ! -L "${PLUGIN_DIR}"
+check "package.json is present" test -f "${PLUGIN_DIR}/package.json"
+check "herdr-plugin.toml is present" test -f "${PLUGIN_DIR}/herdr-plugin.toml"
+check "the plugin's dependencies are installed" test -d "${PLUGIN_DIR}/node_modules"
+check "the plugin's server directory is present" test -d "${PLUGIN_DIR}/server"
+# The manifest's startup entry — the file herdr actually executes. A plugin whose
+# manifest points at a missing script registers and then does nothing.
+check "the manifest's startup script exists" test -f "${PLUGIN_DIR}/scripts/plugin.ts"
+check "the plugin registry exists" test -f "${HOME}/.config/herdr/plugins.json"
+check "the registry directory is not a symlink" test ! -L "${HOME}/.config/herdr/plugins"
 
 # The registry records three absolute paths per entry. The build writes them
 # pointing into the seed and the entrypoint repairs them to the volume, so after
@@ -135,10 +159,10 @@ console.log("plugin registered from the volume: " + ui.plugin_id + " @" + ui.plu
 # read from the volume rather than from the container environment — so if this
 # file is missing, the environment is silently ignored. Its two non-secret keys
 # are asserted here; the health test proves the port is actually served.
-test -f "${HOME}/.config/herdr/config.toml"
-test -f "${HOME}/.config/herdr/plugins/config/devswha.herdr-web-ui/env"
-grep -q '^HOST=' "${HOME}/.config/herdr/plugins/config/devswha.herdr-web-ui/env"
-grep -q '^PORT=' "${HOME}/.config/herdr/plugins/config/devswha.herdr-web-ui/env"
+check "herdr's config.toml is in the volume" test -f "${HOME}/.config/herdr/config.toml"
+check "the plugin's env file is in the volume" test -f "${HOME}/.config/herdr/plugins/config/devswha.herdr-web-ui/env"
+check "the env file sets HOST" grep -q '^HOST=' "${HOME}/.config/herdr/plugins/config/devswha.herdr-web-ui/env"
+check "the env file sets PORT" grep -q '^PORT=' "${HOME}/.config/herdr/plugins/config/devswha.herdr-web-ui/env"
 
 # ---------------------------------------------------------------------------
 # The toolchain and the persistent install paths the bundled skill documents
@@ -146,14 +170,14 @@ grep -q '^PORT=' "${HOME}/.config/herdr/plugins/config/devswha.herdr-web-ui/env"
 # The skill tells the agent it can build native modules and `pip install --user`,
 # so both have to be true in the image rather than assumed. ripgrep is a hard
 # prerequisite of the plugin's own runtime, so it is part of "the image works".
-command -v make g++ python3 rg git curl >/dev/null
+check "make, g++, python3, rg, git, curl are on PATH" command -v make g++ python3 rg git curl
 curl --version >/dev/null
 rg --version >/dev/null
 python3 -m pip --version
 # `/data/npm` is where the agent's own tools go; the image's packages must not be
 # there or a stale copy shadows the baked one.
-test ! -e "${NPM_CONFIG_PREFIX}/lib/node_modules/pi-web-ui"
-test ! -e "${NPM_CONFIG_PREFIX}/lib/node_modules/@earendil-works/pi-coding-agent"
+check "no migrated pi-web-ui in /data/npm" test ! -e "${NPM_CONFIG_PREFIX}/lib/node_modules/pi-web-ui"
+check "no migrated pi CLI in /data/npm" test ! -e "${NPM_CONFIG_PREFIX}/lib/node_modules/@earendil-works/pi-coding-agent"
 if ls /usr/lib/python3*/EXTERNALLY-MANAGED >/dev/null 2>&1; then
   echo "PEP 668 marker still present — pip install --user would refuse" >&2
   exit 1
@@ -167,10 +191,10 @@ fi
 # `persistent-tool-install` is hand-written in this repo; `herdr` is generated at
 # build time from the installed binary (`herdr --skill`), so this also proves the
 # vendor's skill reached the agent with its frontmatter intact.
-test -f /opt/pi-docker/skills/persistent-tool-install/SKILL.md
-test -L /data/agent/skills/persistent-tool-install
-test -f /opt/pi-docker/skills/herdr/SKILL.md
-test -L /data/agent/skills/herdr
+check "the hand-written skill is in the image" test -f /opt/pi-docker/skills/persistent-tool-install/SKILL.md
+check "it is linked into the agent dir" test -L /data/agent/skills/persistent-tool-install
+check "the generated herdr skill is in the image" test -f /opt/pi-docker/skills/herdr/SKILL.md
+check "it is linked into the agent dir" test -L /data/agent/skills/herdr
 node -e '
 import("/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js").then((m) => {
   const r = m.loadSkills({ cwd: "/workspace", agentDir: "/data/agent", skillPaths: [], includeDefaults: true });
