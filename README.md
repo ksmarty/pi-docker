@@ -364,6 +364,18 @@ V=$(curl -fsSL https://download.docker.com/linux/static/stable/x86_64/ | grep -o
 docker exec pi bash -lc "curl -fsSL https://download.docker.com/linux/static/stable/x86_64/${V}.tgz | tar xz -C /tmp && install -m 0755 /tmp/docker/docker /data/npm/bin/docker"
 ```
 
+Building *this* image additionally needs `buildx`: the Dockerfile uses BuildKit
+cache mounts, and `docker build` stops with "BuildKit is enabled but the buildx
+component is missing" without it. It is not in the image for the same reason the
+client is not:
+
+```bash
+B=$(curl -fsSI https://github.com/docker/buildx/releases/latest | tr -d '\r' | sed -n 's/^[Ll]ocation:.*\/tag\///p')
+docker exec pi bash -lc "curl -fsSL -o /data/home/.docker/cli-plugins/docker-buildx \
+  https://github.com/docker/buildx/releases/download/${B}/buildx-${B}.linux-amd64 && \
+  chmod +x /data/home/.docker/cli-plugins/docker-buildx"
+```
+
 `docker compose config` needs no daemon at all, which makes it the one useful
 docker check when the socket is absent: it validates these compose files and
 resolves the labels.
