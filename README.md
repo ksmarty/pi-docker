@@ -308,13 +308,29 @@ thing — the client turns that into a lock/sign-in screen.
 | --- | --- | --- |
 | keep the browser's `Host` | `Origin` is compared with the URL built from `Host` | `/ws` → `403 invalid origin` |
 | send `X-Forwarded-For` | otherwise a proxied visitor counts as the machine itself | the UI is open to anyone who reaches the proxy, pairing or not |
-| send `X-Forwarded-Proto: https` when it terminates TLS | `Origin` says `https://…` while the URL is read as `http://…` | `/ws` → `403 invalid origin` |
+| send `X-Forwarded-Proto: https` when it terminates TLS | `Origin` says `https://…` while the URL is read as `http://…`, and the same header decides whether the plugin marks its device cookie `Secure` | `/ws` → `403 invalid origin`, or a pairing cookie that an HTTPS browser silently drops — every request then arrives unauthenticated while the shell still loads |
 | pass the WebSocket upgrade for `/ws` | that is the terminal and the roster stream | the UI never leaves "Connecting…" |
 
 Traefik does all four by default (`passHostHeader` defaults to true), which is why
 the shipped labels need nothing extra. The vendor's guide carries Caddy and nginx
 examples; the nginx one matters, because a bare `proxy_pass` gets *none* of the
 four right.
+
+### Forward-auth middleware (authentik, authelia, oauth2-proxy)
+
+The plugin does not read a proxy's identity headers — authentik's `X-authentik-*`
+means nothing to it — so a login at the middleware does **not** authenticate the
+socket. The plugin has its own gate: `HERDR_WEB_TOKEN`, or a device it has paired.
+That is what "set a token first" means in the vendor's guide, and it is why an
+unauthenticated upgrade is answered `401 unauthorized` rather than being let
+through on the strength of a proxy login.
+
+It also makes a forward-auth middleware worth keeping off `/ws`: one that answers
+the upgrade instead of passing it — or waits on the auth server while the browser
+waits on it — produces a page that loads and a socket that never connects, with
+no error anywhere that names the cause. The shipped labels therefore give `/ws`
+its own router without the middleware and let the plugin's own gate carry the
+socket, so **set a token** (or pair a device) when you deploy that way.
 
 From outside, one line tells the three failure modes apart:
 `GET /api/session` → `200` the proxy is wired up, `401` a token or device pairing

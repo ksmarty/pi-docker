@@ -56,6 +56,15 @@ services:
       - traefik.enable=true
       - traefik.http.routers.pi.rule=Host(`pi.notato.xyz`)
       - traefik.http.routers.pi.middlewares=authentik@file
+      # The socket is routed on its own, *without* the forward-auth middleware. A
+      # middleware that answers the upgrade rather than passing it — or waits on
+      # it — leaves the UI at "Connecting…" forever while the shell loads fine,
+      # which reads like a backend that never came up. The plugin authenticates
+      # /ws itself (HERDR_WEB_TOKEN, or a paired device's cookie), so set a token
+      # whenever you bypass the proxy's own gate.
+      - traefik.http.routers.pi-ws.rule=Host(`pi.notato.xyz`) && Path(`/ws`)
+      - traefik.http.routers.pi-ws.priority=100
+      - traefik.http.routers.pi-ws.service=pi
       - traefik.http.services.pi.loadbalancer.server.port=7317
     networks:
       - traefik
