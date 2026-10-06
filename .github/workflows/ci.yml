@@ -19,10 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     # Two Node lines are built and smoke-tested. Nothing in this image compiles a
-    # native module at build time any more (Collie and herdr ship prebuilt
-    # binaries for each architecture), so this is no longer a compiler check — it
-    # is the cheap proof that the agent CLI, the skill loader and the entrypoint
-    # still work end to end on both supported lines.
+    # native module at build time any more (herdr ships a prebuilt static binary,
+    # and the plugin's dependencies are installed from the lockfile), so this is
+    # no longer a compiler check — it is the cheap proof that the agent CLI, the
+    # plugin's registration, the skill loader and the entrypoint still work end to
+    # end on both supported lines.
     strategy:
       fail-fast: false
       matrix:
@@ -67,19 +68,31 @@ jobs:
           docker run --rm -e EXPECT_NODE='${{ matrix.node }}' pi-docker:ci \
             bash -lc "$(cat scripts/ci-smoke.sh)"
 
-      # Regression test for the v0.1.0 outage: Collie refuses any Host it is not
-      # told about, so a plain probe to 127.0.0.1 fails and the container never
-      # looked healthy while the app was serving fine. Boots the image in that
-      # configuration, requires it to reach `healthy` on its own, and checks from
-      # inside that the seeded apps and herdr's server are really there.
-      - name: Healthcheck passes under a strict host allow-list
+      # Regression test for the outage that started this repo: the container was
+      # serving, but its healthcheck probed with a Host header the app refused, so
+      # docker reported `unhealthy` forever and `docker compose up --wait` gave up
+      # — "it never came online". Boots the image fresh (empty volume, no
+      # environment beyond the compose defaults), requires it to reach `healthy` on
+      # its own, and checks from inside that herdr's server, the seeded plugin and
+      # the plugin process are really there.
+      - name: Healthcheck reaches healthy on its own, from an empty volume
         run: bash scripts/ci-health.sh
 
-      # The host allow-list is the whole point of COLLIE_PUBLIC_HOSTS, so pin the
-      # contract the healthcheck depends on: the allowed host is served, an
-      # unknown Host is not.
-      - name: Host guard answers the allowed host and refuses others
-        run: bash scripts/ci-host-guard.sh
+      # The served HTTP contract of the web UI, pinned from outside: the shell is
+      # served, /api/health reports ok:true with the herdr link and the web_ui boot
+      # state, a foreign Host changes nothing (this plugin has no host allow-list —
+      # asserting otherwise is how the previous probe lied), and /health without
+      # /api is the SPA rather than an endpoint. Runs with a token set, so the
+      # locked-down configuration is what gets tested.
+      - name: Web UI serves its shell and an ok:true health body
+        run: bash scripts/ci-web-ui.sh
+
+      # The invariant the whole image exists for: a tool the agent installs into
+      # /data/npm, the agent's own state and a plugin update all survive a restart
+      # *and* a container recreate — and re-seeding must never overwrite a volume
+      # that already has the apps, or `herdr update` would silently revert.
+      - name: Tools, agent state and app updates survive restart and recreate
+        run: bash scripts/ci-persistence.sh
 
       # The entrypoint has to clean up after the pre-Dockerfile layout, where the
       # old web UI and the pi CLI lived in the persisted npm prefix. Left there,

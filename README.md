@@ -1,16 +1,25 @@
 # pi-docker
 
-A self-contained, persistent Docker image for [Herdr](https://herdr.dev) and the
-[Collie PWA](https://colliepwa.dev), plus the
-[pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
+A self-contained, persistent Docker image for [Herdr](https://herdr.dev), its
+[web UI plugin](https://github.com/devswha/herdr-web-ui) (`devswha.herdr-web-ui`),
+and the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 CLI.
 
-Herdr runs as the terminal multiplexer holding your panes and agents; Collie is
-the web app you reach them from; `pi` is available inside those panes. The image
-bakes both apps, the agent and the build toolchain in, so the container starts in
-seconds, and it funnels **everything persistent** — herdr's state, Collie's
-config and pairing, the agent's config and sessions, and any tool the agent
-installs — into a single `/data` volume plus the `/workspace` project directory.
+Herdr runs as the headless terminal multiplexer that owns your panes and the
+agents running in them; the web UI plugin is the app you reach them from — a PWA
+you install to a phone's home screen; `pi` is on `PATH` inside every pane. The
+image bakes herdr's seed, a *built* copy of the plugin, the agent and the build
+toolchain in, so the container starts in seconds without network access, and it
+funnels **everything persistent** — herdr's state and config, the plugin's
+checkout, config and pairing state, the agent's config and sessions, and any tool
+the agent installs — into a single `/data` volume plus the `/workspace` project
+directory.
+
+The plugin is the only HTTP surface. It has no host allow-list of its own:
+first-run access is gated by the plugin's device pairing (and optionally by a
+shared `HERDR_WEB_TOKEN`). That is why the compose files publish no port and put
+the UI behind your reverse proxy — the Traefik labels plus the `authentik@file`
+middleware are part of the deployment, not an afterthought.
 
 ```bash
 cp .env.example .env                          # set USERDIR and your domain
@@ -19,29 +28,47 @@ docker compose -f compose.ghcr.yaml up -d     # published image
 docker compose up -d                          # build locally
 ```
 
-Then open `https://pi.notato.xyz` (or your own domain) and **pair your phone
-once** — writes need a paired device:
+## Quick start
 
-```bash
-docker exec -it collie collie pair     # prints an 8-character code, valid 10 minutes
-```
+1. `cp .env.example .env` and set `USERDIR` to the host directory that will hold
+   the mounts.
+2. Edit the Traefik `Host(...)` rule (and, if you are not using `pi.notato.xyz`,
+   the `authentik@file` middleware) in the compose file you deploy, and set the
+   domain in `.env` to match.
+3. Start it:
 
-Enter that code in Collie under **Settings → System → Paired devices**.
+   ```bash
+   docker compose -f compose.ghcr.yaml up -d     # ghcr.io/ksmarty/pi-docker:latest
+   # or
+   docker compose up -d                          # build locally
+   ```
 
----
+4. Open `https://pi.notato.xyz` (or your own domain) and **pair a device**.
+   With no `HERDR_WEB_TOKEN` set, the plugin's own device pairing is the gate, so
+   the first visitor to reach an ungated port is the one who pairs. Pairing uses
+   a six-digit code the plugin shows; the paired-device state lives in
+   `HERDR_WEB_STATE_DIR`, so it is part of your `/data` backup.
+
+`docker compose up --wait` treats an unhealthy container as a failed start; a
+first boot on an empty volume seeds the stack before anything binds, which is why
+the healthcheck has a generous start period (see [Health](#health)).
 
 ## What runs inside
 
 | Process | Role |
 | --- | --- |
-| `herdr server` | The headless multiplexer. Owns the panes and the agents running in them. Started by the entrypoint, which waits for it to answer on the socket API before starting the bridge. Its log is `~/.config/herdr/herdr-server.log` (the entrypoint's own `~/.herdr/server.log` holds just its startup banner). |
-| `collie _exec-bridge` | Collie's bridge, the container's foreground process. It mirrors herdr's panes to the PWA over HTTP/WebSocket on `8787`. |
-| `pi` | On `PATH` in every pane, along with the rest of the image's toolchain. |
+| `herdr server` | The headless multiplexer. The entrypoint starts it in the background, waits for the **socket API** to answer (`herdr api snapshot`), then supervises it in the foreground (`wait`) — the container lives exactly as long as the server does. Its real log is `~/.config/herdr/herdr-server.log`; the entrypoint's own `~/.herdr/server.log` holds just its startup banner. |
+| `devswha.herdr-web-ui` | The Bun web UI / PWA. It is a herdr plugin, not a separate process the entrypoint starts: herdr's own plugin startup hook runs it (`startup: bun scripts/plugin.ts start`), and it listens on `${HERDR_WEB_HOST}:${HERDR_WEB_PORT}`. |
+| `pi` | The coding-agent CLI, on `PATH` in every pane along with the rest of the image's toolchain. |
 
-The bridge is exactly what Collie's own systemd unit starts
-(`ExecStart=<root>/bin/collie _exec-bridge --instance <name>`), so it is pinned
-two ways: the build fails if that command ever disappears from the binary, and CI
-boots the container and requires the bridge to come up healthy.
+The startup sequence is: prepare `/data` → seed herdr and the plugin when
+missing → write the plugin's settings file → clean migrated installs → symlink
+the bundled skills → write `/etc/profile.d/pi-paths.sh` → `herdr server` →
+`herdr api snapshot` → wait (bounded) for the web UI port. Because the plugin
+comes up from herdr's hook, the entrypoint waits on the socket first and the
+port second, and the readiness probe is the socket API — `herdr session list` is
+a local command that exits 0 even when no server is up, so it would report ready
+against a dead server.
 
 ## The persistence model
 
@@ -50,18 +77,20 @@ lives in two mounts:
 
 | Mount | Env | Holds |
 | --- | --- | --- |
-| `/data/home` | `HOME` | `~/.herdr` (herdr's state, snapshots, worktrees), `~/.config/herdr`, Collie's install root `~/.local/share/collie`, `~/.config/collie` (`.env`, `config.toml`, pairing), `~/.local/state/collie`, `~/.npm` cache, `~/.local/bin` (`pip --user`, `uv`, `pipx`, the `herdr` binary), `~/.cargo`, `~/go`, `~/.bun` |
-| `/data/agent` | `PI_CODING_AGENT_DIR` | pi's config, API keys, sessions, packages/extensions, `skills/`, and its own `bin/` |
+| `/data/home` | `HOME` | `~/.herdr` (state, snapshots, worktrees); `~/.config/herdr` (`config.toml`, `plugins.json`, the plugin checkout under `plugins/github/`, and the plugin's `config/devswha.herdr-web-ui/env`); `~/.config/herdr-web-ui` (pairing, push keys, device subscriptions, update builds); the `~/.npm` cache; `~/.local/bin` (`pip --user`, uv, pipx, the `herdr` binary); `~/.cargo`; `~/go`; `~/.bun` |
+| `/data/agent` | `PI_CODING_AGENT_DIR` | pi config, API keys, sessions, packages/extensions, `skills/`, and its own `bin/` |
 | `/data/npm` | `NPM_CONFIG_PREFIX` | every `npm install -g <tool>` the agent performs (never the apps — see below) |
 | `/workspace` | `PI_WORKSPACE_DIR` | the agent's project files |
 
 `/data` is a single volume, so one bind mount (`${USERDIR}/data/pi/data:/data`)
-captures all of it.
+captures all of it. A backup is one tar of `$USERDIR/data/pi` (see
+[Backup and restore](#backup-and-restore)).
 
 ### Installing tools that stick
 
-Because `NPM_CONFIG_PREFIX` points into the volume and `HOME` does too, the agent
-can install tools at runtime and they are still there after a restart:
+Because `HOME` and `NPM_CONFIG_PREFIX` point into the volume, the agent can
+install tools at runtime and they are still there after a restart *and* a
+container recreate:
 
 ```bash
 npm install -g some-cli          # -> /data/npm/bin/some-cli        (persisted)
@@ -74,47 +103,58 @@ bun add -g some-tool              # -> /data/home/.bun/bin/...      (persisted)
 curl -o /data/npm/bin/x <url> && chmod +x /data/npm/bin/x   # standalone binary
 ```
 
-All of those directories are already on `PATH` — for the bridge process **and**
-for the panes Collie shows (the entrypoint also writes
+All of those directories are already on `PATH` — for the container's main process
+**and** for the panes the web UI shows (the entrypoint also writes
 `/etc/profile.d/pi-paths.sh`). `apt-get install` writes to the container
 filesystem, not the volume: it survives a plain restart but is gone the next time
-the container is recreated, and it is not in a `/data` backup. Use it for one-off
-system packages only, or add the package to the `Dockerfile`.
+the container is recreated (image update, `docker compose down && up`, fresh
+deploy) and is not in a `/data` backup. Use it for one-off system packages only,
+or add the package to the `Dockerfile`.
 
-The image ships the C/C++ toolchain (`python3`, `make`, `g++`) on purpose: many
-npm packages with native bindings compile on install. The PEP 668 "externally
-managed" marker is removed so `pip install --user` works — the toolchains that are
-*not* built in (`uv`, `pipx`, `cargo`, `go`, `bun`) still install into `$HOME` and
-persist, because `HOME` is on the volume.
+The image ships `node` (the chosen `NODE_VERSION` line), `npm`, `bun`, `python3`
++ `pip`, `make`/`g++` for native modules, `git`, `ripgrep`, `curl`, `jq`,
+`unzip` and a few small utilities. The PEP 668 "externally managed" marker is
+removed so `pip install --user` works — the runtime that is *not* baked in (uv,
+pipx, cargo, go) still installs into `$HOME` and persists, because `$HOME` is on
+the volume.
 
-### Herdr and Collie live in the volume
+The bundled [`persistent-tool-install`](skills/persistent-tool-install/SKILL.md)
+skill covers the details. Its one hard rule: **never** install the image's own
+packages — the pi CLI, `bun`, or `herdr` — with `npm install -g`. `/usr/local`
+comes first on `PATH` (ahead of `/data/npm/bin`), so a volume copy is inert and
+shadowed; the entrypoint additionally deletes any `@earendil-works/pi-coding-agent`
+it finds in `/data/npm` at startup. To update the pi CLI, update the image.
 
-The two apps are **seeded from the image into `/data/home` on first start**, not
+### Herdr and the web UI plugin live in the volume
+
+Both apps are **seeded from the image into the volume on first start**, not
 installed into `/data` at build time and not symlinked out of the image:
 
 - an empty volume boots a complete, working stack with no network access;
-- `herdr update` and `collie update` write into the volume, so a self-update
-  survives a restart **and** a container recreate (`docker compose down && up`);
+- `herdr update`, `herdr plugin update` and the web UI's **Settings → Updates**
+  write into the volume, so a self-update survives a restart **and** a container
+  recreate (`docker compose down && up`);
 - the entrypoint never overwrites an existing install, so an image rebuild cannot
   clobber a version you updated to;
-- `collie` on `PATH` is a small wrapper that resolves the install root at runtime
-  (`$COLLIE_DIR`, default `~/.local/share/collie`), which is what makes those
-  updates land in the volume rather than in an image layer.
+- the seeded herdr is a real binary at `$HOME/.local/bin/herdr`, and the plugin is
+  a real checkout (with its `node_modules`) under
+  `$HOME/.config/herdr/plugins/github/devswha.herdr-web-ui` — neither is a symlink
+  back into the image, which is what makes their in-place updaters land somewhere
+  that persists.
 
-The trade-off is deliberate and worth knowing: after a self-update, the volume
-copy and the image's seed can differ, and the volume wins. To go back to the
-version baked into the image, remove the install and restart:
+The trade-off is deliberate: after a self-update the volume copy and the image's
+seed can differ, and the volume wins. To return to the version baked into the
+image, remove the install and restart:
 
 ```bash
-rm -rf /data/home/.local/share/collie    # Collie
-rm -f  /data/home/.local/bin/herdr       # herdr
+rm -f  /data/home/.local/bin/herdr
+rm -rf /data/home/.config/herdr/plugins /data/home/.config/herdr/plugins.json
 docker compose restart
 ```
 
 ### The bundled skills
 
-Herdr and Collie are made to be driven by an agent, so the image ships two
-skills and publishes both to the agent at startup:
+The image ships two skills and publishes both to the agent at startup:
 
 | Skill | Source | Covers |
 | --- | --- | --- |
@@ -122,162 +162,161 @@ skills and publishes both to the agent at startup:
 | `herdr` | generated at build time from `herdr --skill` | Driving panes, tabs, workspaces and the agents inside them, as the installed herdr version documents it (the vendor's own text, so it cannot drift from the binary). |
 
 The entrypoint symlinks each one into `${PI_CODING_AGENT_DIR}/skills/`, where pi
-discovers global skills, so:
-
-- they are available out of the box, including to `/skill:herdr` and `/skill:persistent-tool-install`;
-- an image rebuild updates them, because the links point into the image, not a copy;
-- a skill *you* replace with a real directory of the same name is left untouched.
-
-It covers one gotcha worth repeating: never `npm install -g` the pi CLI — the
-image manages it, and the copy would be shadowed by `/usr/local` anyway.
-
-## Migrating from the pi-web-ui image
-
-Nothing in `/data` needs to change: same volume, same `HOME`, same agent dir. The
-service was renamed from `pi-web-ui` to `collie`, so let compose remove the old
-container on the way in:
-
-```bash
-docker compose -f compose.ghcr.yaml up -d --remove-orphans
-```
-
-On startup the entrypoint also **removes the app a pre-Dockerfile compose left in
-`/data/npm`**:
-
-```
-[pi-docker] removing stale pi-web-ui from /data/npm/lib/node_modules (the image provides it now)
-[pi-docker] removing dangling /data/npm/bin/pi-web-ui
-```
-
-`/data/npm` is reserved for the tools the agent installs, and a leftover copy of
-the old web UI there would keep an outdated server around next to the image's own
-binaries. The removal is deliberately narrow — only those two package directories
-(`pi-web-ui`, `@earendil-works/pi-coding-agent`) and their dangling `bin`
-symlinks. Anything else the agent installed into `/data/npm` is left alone, and a
-real file you put in `bin/` is never deleted.
-
-It is also guarded: the cleanup only runs when the image's own Collie wrapper is
-present at `/usr/local/bin/collie`. Running this entrypoint against a volume where
-`/data/npm` holds the *only* install (an older container, a host shell) leaves it
-alone instead of deleting the installation you depend on. Override the location
-with `PI_IMAGE_PREFIX` if your build puts the app elsewhere.
+discovers global skills, so they are available out of the box (including to
+`/skill:herdr` and `/skill:persistent-tool-install`), an image rebuild updates
+them because the links point into the image, and a skill *you* replace with a real
+directory of the same name is left untouched.
 
 ## Configuration
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `COLLIE_PUBLIC_HOSTS` | *(unset)* | Allow-list of hostnames Collie's **API routes** answer on, e.g. `pi.example.com`. A request carrying any other `Host` gets `403 host not allowed` there (measured: `/api/config`, `/api/devices`, `/api/pair`). The UI shell and `/api/health` are served to any Host — so a by-IP visit renders the page and then cannot talk to the API, which is why the compose files publish no port. |
-| `COLLIE_ALLOWED_ORIGINS` | *(unset)* | Origins allowed to use the UI, e.g. `https://pi.example.com`. **Without it, behind a proxy, the UI loads as an empty page.** |
-| `COLLIE_PUBLIC_URL` | *(unset)* | Public URL used for generated links (pairing, notifications). |
-| `COLLIE_SKIP_SERVE` | `1` | Do not run `tailscale serve`. The reverse proxy is the only front door (the vendor's deployment "Variant C"). |
-| `COLLIE_HOST` | `0.0.0.0` | Bind address. Non-loopback needs `COLLIE_ALLOW_NON_LOOPBACK_BIND=1` — see [Reverse proxy](#reverse-proxy). |
-| `COLLIE_ALLOW_NON_LOOPBACK_BIND` | `1` | Required for Traefik (a proxy in another container cannot reach this container's `127.0.0.1`). |
-| `COLLIE_PORT` | `8787` | HTTP port. |
-| `COLLIE_MUX` | `herdr` | Which multiplexer Collie mirrors. Set explicitly: with none set it probes and refuses when it finds zero or several. |
-| `COLLIE_TRUSTED_USER_OPTIONAL` | `1` (compose) | Do not require a trusted login header. Behind authentik that header never arrives; writes are authorized by pairing instead. |
-| `COLLIE_DIR` | `/data/home/.local/share/collie` | Collie's install root (`current` → `versions/vX.Y.Z`). |
-| `COLLIE_CONFIG_DIR` | `/data/home/.config/collie` | `.env`, `config.toml`, pairing state. |
-| `COLLIE_STATE_DIR` | `/data/home/.local/state/collie` | Runtime state. |
-| `HERDR_INSTALL_DIR` | `/data/home/.local/bin` | Where the `herdr` binary lives. |
+| `HERDR_WEB_HOST` | `0.0.0.0` | Bind address for the plugin. `0.0.0.0` because a reverse proxy in a *sibling* container cannot reach this container's `127.0.0.1`; the plugin's own default is loopback. |
+| `HERDR_WEB_PORT` | `7317` | HTTP port the plugin binds. Keep the Traefik loadbalancer label in step. |
+| `HERDR_WEB_TOKEN` | *(unset)* | Optional shared secret. Unset leaves the plugin's own device pairing in charge; set it to require a secret as well. The vendor recommends a token for any deployment behind a reverse proxy. |
+| `HERDR_INSTALL_DIR` | `/data/home/.local/bin` | Where the `herdr` binary lives in the volume. |
 | `HERDR_CONFIG_PATH` | `/data/home/.config/herdr/config.toml` | Seeded with `onboarding = false` on first start; yours after that. |
+| `HERDR_WEB_STATE_DIR` | `/data/home/.config/herdr-web-ui` | Pairing, push keys, device subscriptions and update builds. Set by the entrypoint; losing this directory means re-pairing every device. |
 | `HERDR_PROCESS_DETECTION` | `child-groups` | Container runtimes often do not expose the foreground process group herdr's default detection expects. |
 | `PI_WORKSPACE_DIR` | `/workspace` | Directory the agent works in. |
 | `PI_CODING_AGENT_DIR` | `/data/agent` | pi config, sessions, API keys. |
 | `NPM_CONFIG_PREFIX` | `/data/npm` | Global npm prefix — the persisted tool directory. |
 | `HOME` | `/data/home` | Persisted home for the agent, its tools and both apps. |
+| `PI_APP_SEED` | `/opt/pi-docker/seed` | Where the image's herdr and plugin seed live; read by the entrypoint. |
 
-Everything above is an environment variable, so anything the vendors document as
-configurable can also go in `compose.ghcr.yaml`.
+`.env.example` also declares `PI_PUBLIC_URL` — optional, because the plugin builds
+the public address from the request it receives; set it if you terminate TLS
+somewhere other than the proxy that reaches the container. The shipped compose
+files do not forward it into the container.
+
+Everything above is an ordinary environment variable, so anything the vendors
+document as configurable can also go in your compose file.
+
+### Where HOST and PORT actually come from
+
+`HERDR_WEB_HOST`, `HERDR_WEB_PORT` and `HERDR_WEB_TOKEN` are *this image's* knobs,
+not the plugin's own variable names. The plugin reads its settings from its
+config env file — `$HOME/.config/herdr/plugins/config/devswha.herdr-web-ui/env`
+(`herdr plugin config-dir devswha.herdr-web-ui` prints the directory) — and
+**that file wins over the process environment**.
+
+The entrypoint translates the two container variables into that file on first
+start and only appends a key that is not already present:
+
+```
+HOST=0.0.0.0
+PORT=7317
+```
+
+So a `HOST`/`PORT` you put in the file yourself wins, and — the thing users get
+wrong — **changing `HERDR_WEB_HOST`/`HERDR_WEB_PORT` after first start has no
+effect**, because the key already exists in the volume. Edit (or delete) that file
+and restart to change it. The entrypoint prints the *effective* bind it read back
+from the file, so a file that disagrees with the compose file is visible in the
+log rather than mysterious:
+
+```
+[pi-docker] web ui bind: 0.0.0.0:7317  (state: /data/home/.config/herdr-web-ui)
+[pi-docker] plugin env : HOST=0.0.0.0 PORT=7317
+```
+
+`HERDR_WEB_TOKEN`, when set, is written into the same file and `chmod 600`; its
+value is never printed. If the port is exposed in any way, set a token.
 
 ### Pairing a device
 
-Collie authorizes writes per device, and pairing is the credential:
+The plugin authorizes per device, and pairing is the credential. Open the UI and
+pair — the plugin shows a six-digit code. The paired-device state lives under
+`HERDR_WEB_STATE_DIR` (`/data/home/.config/herdr-web-ui`), so restoring the
+`/data` volume keeps your devices paired. With no `HERDR_WEB_TOKEN`, the
+`authentik@file` login in front of the proxy is the **only** gate until the first
+device pairs, and the entrypoint says so on every start:
 
-```bash
-docker exec -it collie collie pair
 ```
-
-It prints an 8-character code valid for 10 minutes; enter it in the PWA under
-**Settings → System → Paired devices**. The paired-device list lives in
-`COLLIE_CONFIG_DIR`, so it is part of your `/data` backup — restore the volume and
-your phone stays paired. To start over, unpair in the UI and pair again.
-
-`authentik@file` in the Traefik labels is the *door*; pairing is what makes a
-browser allowed to *write*. Both are in play, which is why
-`COLLIE_TRUSTED_USER_OPTIONAL` is set: Collie would otherwise wait for a trusted
-login header that authentik does not send.
+[pi-docker] auth : no token — pair your devices; the proxy's login is the only gate until then
+```
 
 ### Versions
 
-Everything is installed at build time and can be pinned:
+Everything is baked at build time and can be pinned:
 
 ```bash
 docker build \
-  --build-arg COLLIE_VERSION=v1.16.2 \
   --build-arg HERDR_VERSION=0.9.3 \
-  --build-arg PI_CODING_AGENT_VERSION=0.85.1 \
+  --build-arg HERDR_WEB_UI_VERSION=v0.3.50 \
+  --build-arg PI_CODING_AGENT_VERSION=latest \
   --build-arg NODE_VERSION=26 \
   -t pi-docker .
 ```
 
-`COLLIE_VERSION` and `HERDR_VERSION` default to `latest`, which uses each
-vendor's own installer and verifies the release checksum
-(`herdr.dev/latest.json`, Collie's `.sha256` asset). With an explicit version the
-build *asserts* it got that release: the installers always fetch latest, so a
-build that silently moved past your pin fails instead of shipping something you
-did not ask for.
-
-`NODE_VERSION` picks the `node:<major>-bookworm-slim` base and defaults to `26`
-(current LTS); `24` is also supported. CI builds both on every change.
+- `HERDR_VERSION` defaults to `latest`, which uses herdr's installer and verifies
+  the checksum from `herdr.dev/latest.json`. With an explicit version the build
+  **asserts** it got that release and fails instead of moving past your pin.
+- `HERDR_WEB_UI_VERSION` defaults to `v0.3.50` and is *pinned on purpose*: the
+  plugin is the app this image exposes, and `latest` would make an image rebuild a
+  silent upgrade of the thing users log into. It is the git ref passed to
+  `herdr plugin install devswha/herdr-web-ui --ref`. Bump it to update, or use
+  Settings → Updates in the web UI (that path persists).
+- `PI_CODING_AGENT_VERSION` defaults to `latest` and is installed with
+  `npm install --global "@earendil-works/pi-coding-agent@<version>"` into
+  `/usr/local`.
+- `NODE_VERSION` picks the `node:<major>-bookworm-slim` base and defaults to `26`
+  (current LTS); `24` is also supported. CI builds both on every change.
+- `VERSION` and `COMMIT` (defaults `dev` / `unknown`) are image labels supplied by
+  the release workflow.
 
 ## Reverse proxy
 
-The compose files carry the Traefik labels used in production
-(`pi.notato.xyz` + the `authentik@file` middleware). To use your own hostname,
-change the Traefik `Host(...)` rule **and** `COLLIE_PUBLIC_HOSTS` /
-`COLLIE_ALLOWED_ORIGINS` / `COLLIE_PUBLIC_URL` to match.
+The compose files carry the Traefik labels used in production:
 
-Do **not** publish the port. Traefik reaches the container over the docker
-network, and `-p 8787:8787` only invites the request Collie refuses (see the
-empty-list case below). The compose files leave `ports:` out for this reason.
+```yaml
+labels:
+  - traefik.enable=true
+  - traefik.http.routers.pi.rule=Host(`pi.notato.xyz`)
+  - traefik.http.routers.pi.middlewares=authentik@file
+  - traefik.http.services.pi.loadbalancer.server.port=7317
+```
 
-One deviation from Collie's documented proxy recipes is unavoidable here: they
-assume a proxy on the same host (loopback) or `network_mode: host`, and warn that
-"inside a container 127.0.0.1 is the container, not your host". A proxy in a
-*sibling* container cannot reach this container's loopback, so the image binds
-`0.0.0.0` with `COLLIE_ALLOW_NON_LOOPBACK_BIND=1` — Collie refuses a non-loopback
-bind unless asked explicitly, which is exactly the opt-in. The cost is that
-anything inside the container can reach the port; here that is root and nothing
-else. If your proxy runs on the host, drop both variables to stay loopback-only.
+To use your own hostname, change the `Host(...)` rule in both the compose file and
+`.env` (and adjust the middleware if you do not run `authentik@file`).
+
+**Do not publish the port.** Traefik reaches the container over the shared docker
+network, and the plugin has no host allow-list of its own — a published port puts
+the UI on every interface of the host, where the first unauthenticated visitor is
+the one who gets to pair it. The compose files leave `ports:` out for this reason.
+If you really need direct access, publish it *and* set `HERDR_WEB_TOKEN`, so the
+port is not the only gate.
+
+One deviation is unavoidable in the default layout: a proxy in a *sibling*
+container cannot reach this container's loopback, so the image binds `0.0.0.0`.
+The cost is that anything inside the container can reach the port; here that is
+root and nothing else. If your proxy runs on the host, set `HERDR_WEB_HOST` to
+`127.0.0.1` — but then the UI is unreachable from a sibling Traefik container.
 
 ## Health
 
 The image declares a healthcheck against `GET /api/health`:
 
 ```bash
-docker inspect --format '{{.State.Health.Status}}' collie
+docker inspect --format '{{.State.Health.Status}}' pi
 ```
 
-The probe connects to loopback and sends a `Host` header taken from the **first
-entry of `COLLIE_PUBLIC_HOSTS`**. Collie's allow-list covers its API routes, not
-the health endpoint — `/api/health` answers on any Host by design — so this
-header is belt-and-braces: it keeps the probe correct if that ever tightens.
-(`fetch()` cannot set it at all — `Host` is a forbidden header and undici drops
-it silently. The v0.1.0 outage was pi-web-ui's guard refusing loopback on *every*
-route, combined with exactly that dropped header.) The same rules apply to your
-own checks:
+The probe connects to loopback, reads the port from the plugin's own env file
+first (falling back to `HERDR_WEB_PORT`), and requires a 200 **and** `"ok":true`:
 
-```bash
-# an API route: the allowed host is served, a stranger host is refused
-curl -s -o /dev/null -w 'allowed  %{http_code}\n' -H 'Host: pi.notato.xyz' http://127.0.0.1:8787/api/config
-curl -s -o /dev/null -w 'stranger %{http_code}\n' -H 'Host: nope.example'   http://127.0.0.1:8787/api/config
-
-# the health endpoint answers either way — that is what makes it a liveness probe
-curl -s -o /dev/null -w 'health   %{http_code}\n' -H 'Host: nope.example'   http://127.0.0.1:8787/api/health
+```
+{"ok":true,"herdr":{"version":…,"protocol":22},"auth":{…},"web_ui":{"boot_id":…,"revision":…}}
 ```
 
-`/api/health` is unauthenticated on purpose (it exposes no secrets), so it works
-regardless of pairing.
+`ok:true` is the vendor's liveness field and proves both halves are alive: the
+plugin (`web_ui.boot_id`) and its socket link to the herdr server (`herdr`). The
+route is **unauthenticated by design**, so the probe keeps working with a
+`HERDR_WEB_TOKEN` set — that is what makes the locked-down deployment the one CI
+tests. `/health` without the `/api` prefix is the single-page-app shell, **not** a
+health endpoint; do not probe it. A container whose server is up but whose UI
+never came up must not look healthy, which is exactly what `ok:true` catches. On
+failure the probe prints the status code and body to stderr, which lands in
+`docker inspect`'s health log.
 
 ## Updating
 
@@ -291,10 +330,8 @@ docker compose up -d --build                    # local build instead of pull
 The apps update themselves, and those updates persist:
 
 ```bash
-docker exec -it collie collie update
-docker exec -it collie collie update --rollback   # previous version
-docker exec -it collie herdr update               # inside a pane, or:
-docker exec -it collie /data/home/.local/bin/herdr update
+herdr update                  # inside a pane, or via the web UI's Settings -> Updates
+herdr plugin update devswha.herdr-web-ui
 ```
 
 The pi CLI is the exception: it is a package installed into the image, so it
@@ -312,105 +349,124 @@ docker compose up -d
 ```
 
 Restoring is the same in reverse: unpack so that `data/pi/data` and
-`data/pi/workspace` are back in place. Collie's pairing and herdr's sessions come
-back with it.
+`data/pi/workspace` are back in place. The plugin's pairing and herdr's sessions
+come back with it.
 
-## CI & releases
+## Migrating from Collie or pi-web-ui
 
-| Workflow | Trigger | Does |
-| --- | --- | --- |
-| `.github/workflows/ci.yml` | push to `main`, every PR | Builds the image for `linux/amd64` on **Node 24 and 26**, smoke-tests that `collie`, `herdr` and `pi` are on `PATH` and run, that the apps were seeded into the volume as real copies, that the bundled skill is discoverable, that a strict host allow-list still yields a **healthy** container with herdr's server reachable and the bridge running, that the host guard answers only the allowed host, that the entrypoint cleans up migrated installs without reseeding, and validates both compose files. |
-| `.github/workflows/release.yml` | push to `main`, manual dispatch | Computes the next semver tag from conventional commits, builds and pushes a multi-arch (`amd64`/`arm64`) image to GHCR, creates a GitHub Release. |
-
-Commits are classified the usual way: `feat!:`/`BREAKING CHANGE` → major,
-`feat:` → minor, anything else → patch. Manual runs choose the bump.
-
-## Run the published image (GHCR)
-
-The image is published by the Release workflow to
-**`ghcr.io/ksmarty/pi-docker`**, tagged with a semver version and `latest`.
+This image replaces the earlier Collie / pi-web-ui stack. The volume needs **no
+migration**: same `/data`, same `HOME`, same agent dir. The compose service was
+renamed, so let compose remove the old container on the way in:
 
 ```bash
-cp .env.example .env      # set USERDIR (and your domain)
-docker compose -f compose.ghcr.yaml up -d
+docker compose -f compose.ghcr.yaml up -d --remove-orphans
 ```
 
-The GHCR package is public, so `docker pull` needs no authentication; make it
-private in the package settings if you would rather it were not.
+The stale install the old stack left inside the volume is cleaned automatically
+on first start. The entrypoint removes `pi-web-ui` and
+`@earendil-works/pi-coding-agent` from `${NPM_CONFIG_PREFIX}/lib/node_modules`
+and any dangling `${NPM_CONFIG_PREFIX}/bin/{pi-web-ui,pi}` symlinks — the old
+compose installed them into the persisted npm prefix, and both are now owned by
+the image. The removal is narrow: `/data/npm` is where the agent's own tools
+live, so nothing else is wiped and a real file you put in `bin/` is left alone.
+It is also guarded: it only runs when the image's own herdr seed is present
+(`${PI_APP_SEED}/bin/herdr`), so running the entrypoint against a volume where
+`/data/npm` holds the *only* install is a no-op.
 
 ## Plain `docker run`
 
 ```bash
-docker run -d --init --name collie \
+docker run -d --init --name pi \
   -v "$PWD/data:/data" \
   -v "$PWD/workspace:/workspace" \
-  -p 127.0.0.1:8787:8787 \
+  -p 127.0.0.1:7317:7317 \
+  -e HERDR_WEB_TOKEN=change-me \
   pi-docker
 ```
 
-This is the **direct-access** form: no host allow-list, so loopback requests are
-accepted. To put it behind a proxy on a public hostname, drop `-p` and set the
-allow-list instead:
+This is the **direct-access** form: loopback-only, with a token, so it is safe to
+expose on the host's loopback. To put it behind a proxy on a public hostname,
+drop `-p` and reach it over the docker network instead.
 
-```bash
-docker run -d --init --name collie \
-  -v "$PWD/data:/data" -v "$PWD/workspace:/workspace" \
-  -e COLLIE_PUBLIC_HOSTS=pi.example.com \
-  -e COLLIE_ALLOWED_ORIGINS=https://pi.example.com \
-  -e COLLIE_PUBLIC_URL=https://pi.example.com \
-  pi-docker
-```
-
-`--init` is recommended (the image runs the bridge as the main process while
-herdr's server runs beside it, and the panes spawn shell/agent children).
-Passing a command other than the default `serve` skips the bridge and runs that
-command instead, which is how the CI tests get a shell through the real
-entrypoint:
+`--init` is recommended (the panes spawn shell/agent children). Passing a command
+other than the default `serve` is exec'd as-is, which is how the CI tests get a
+shell through the real entrypoint:
 
 ```bash
 docker run --rm -it pi-docker bash
 ```
 
-## Notes
+## CI & releases
 
-- The container runs as **root** by design: the agent installs system packages
-  and writes into host bind mounts. To run unprivileged, add `user: "1000:1000"`
-  (or similar) **and** `chown` the host directories to that uid.
-- The C/C++ toolchain is intentionally kept in the final image so the agent can
-  build native modules; this trades some image size for a working `npm i -g`.
-- **Panes survive a restart; running agents do not.** herdr restores the layout
-  from its session snapshot when the server restarts, and resumes the agents in
-  those panes only if you ask it to, in
-  `~/.config/herdr/config.toml`:
+| Workflow | Trigger | Does |
+| --- | --- | --- |
+| `.github/workflows/ci.yml` | push to `main`, every PR | Builds `linux/amd64` on **Node 24 and 26**, then runs the image-facing tests: smoke (`herdr`, `pi`, `bun`, `node` and the toolchain present and runnable; the plugin registered, enabled and pointing into the volume; both bundled skills discovered by pi's own loader), a fresh empty-volume boot reaching **healthy**, the web UI's HTTP contract, persistence across restart **and** container recreate, and the migrated-install cleanup. It also validates both compose files and shell-parses the entrypoint and test scripts. |
+| `.github/workflows/release.yml` | push to `main`, manual dispatch | Computes the next semver tag from conventional commits, builds and pushes a multi-arch (`linux/amd64`, `linux/arm64`) image to **`ghcr.io/ksmarty/pi-docker`** with a semver tag and `latest`, and creates a GitHub Release. `provenance`/`sbom` are off and the cache export is `type=gha,mode=min`. |
 
-  ```toml
-  [session]
-  resume_agents_on_restore = true
-  ```
+Commits are classified the usual way: `feat!:` / `BREAKING CHANGE` → major,
+`feat:` → minor, anything else → patch. Manual runs choose the bump.
 
-- **The container serves nothing to an unexpected `Host`.** If the UI seems
-  down, the first lines of `docker logs` say what it resolved to — the entrypoint
-  prints the binaries it found, the bind address, the host allow-list and the
-  origins (`[pi-docker] hosts : ...`). Then ask for the allowed hostname:
+## Verifying a change
 
-  ```bash
-  curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: pi.notato.xyz' http://127.0.0.1:8787/
-  ```
+There is no test suite to run locally — the "build" is `docker build` and the
+tests boot the built image. When Docker is available:
 
-  An answer there means the app is up and the host allow-list is doing its job.
-- An **empty page** with a 200 response is the origin allow-list, not a crash:
-  set `COLLIE_ALLOWED_ORIGINS` to the URL you actually open.
+```bash
+docker build -t pi-docker:test .
+docker run --rm --entrypoint bash pi-docker:test -lc 'command -v herdr pi bun node npm'
+docker compose -f docker-compose.yml config >/dev/null
+docker compose -f compose.ghcr.yaml config >/dev/null
+```
+
+The image-facing assertions live in `scripts/*.sh` and are piped into the
+container by CI as `bash -lc "$(cat scripts/<name>.sh)"`. Each script runs
+`set -eEuo pipefail` with an `ERR` trap that annotates the failing line, and on
+failure dumps the container logs and docker's own health probe output (as
+`::error::` annotations, because job logs need repo-admin rights). They default to
+the image layout but keep `NPM_CONFIG_PREFIX`, `ENTRYPOINT`, `PI_IMAGE_PREFIX` and
+`HERDR_INSTALL_DIR` overridable so they can be exercised against a throwaway
+prefix without touching a real `/data`.
+
+What the scripts actually assert:
+
+- `ci-smoke.sh` — node/npm/bun/pi/herdr run; the pi CLI and `bun` resolve to
+  `/usr/local/bin`; `/etc/profile.d/pi-paths.sh` and the `/data` dirs exist; the
+  herdr seed exists and the **volume** copy is what runs; `herdr api snapshot`
+  answers; the plugin checkout, `node_modules`, `entry.js` and registry entry
+  exist and all recorded paths resolve inside `$HOME` with `enabled: true`; the
+  plugin's `env` file has `HOST=`/`PORT=`; `make g++ python3 rg git curl` and pip
+  work; the PEP 668 marker is gone; the migrated web UI package and the pi CLI
+  are not in `/data/npm`; and both skills are discovered by pi's loader.
+- `ci-health.sh` — a fresh, no-volume boot reaches `healthy` on its own; the log
+  banner reports the effective bind; `herdr api snapshot` answers and the seeded
+  herdr is not a symlink; the plugin is seeded into the volume and running; and
+  `/api/health` reports `"ok":true`.
+- `ci-web-ui.sh` — with a token set: `GET /` is 200 HTML; `GET /api/health` is 200
+  `"ok":true` with `"herdr"` and `"web_ui"`; a foreign `Host` changes nothing
+  (this plugin has no host allow-list); and `GET /health` is the SPA, not JSON.
+- `ci-persistence.sh` — a tool installed into `/data/npm` is on `PATH` after a
+  restart *and* a recreate; agent state, sessions, `/workspace` files and a
+  user-owned skill survive; a change inside the seeded herdr and a plugin update
+  are **not** overwritten; and the UI still serves after a recreate.
+- `ci-migrated-install.sh` — the migrated web UI and pi CLI copies and their
+  dangling bin links are removed while other `/data/npm` tools and real `bin`
+  files are kept; the cleanup is skipped when the image seed is absent; it is
+  idempotent; and seeding never overwrites an existing install.
 
 ## Repository layout
 
 ```
-Dockerfile              single-stage image (NODE_VERSION, default node:26-bookworm-slim)
-docker-entrypoint.sh    persistent dirs, seeds the apps, cleans migrated installs, starts herdr, execs the bridge
+Dockerfile              single-stage image (ARG NODE_VERSION, default node:26-bookworm-slim)
+docker-entrypoint.sh    prepares the volume, seeds herdr + plugin, starts herdr, supervises it
 config/                 herdr config seeded on first start
-scripts/               shell tests CI runs against the built image (smoke, healthcheck, host guard, cleanup)
+scripts/                shell tests CI runs against the built image
 skills/                 agent skills baked into the image (symlinked into the agent dir)
 docker-compose.yml      local build
 compose.ghcr.yaml       published image (Traefik ready)
-.env.example            USERDIR / host / origin
+.env.example            USERDIR / domain / web UI knobs / version pins
 .github/workflows/      CI + release
 ```
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).

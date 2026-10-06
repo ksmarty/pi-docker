@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 #
 # Runs INSIDE the image, piped in with `bash -lc "$(cat scripts/ci-migrated-install.sh)"`.
-# Covers the entrypoint's migrated-install cleanup, which is what makes an
-# upgrade from the pre-Dockerfile compose automatic instead of a manual rm -rf.
+# Covers the entrypoint's two state-preparation rules:
 #
-# The packages it removes are the ones that compose installed into the persisted
-# npm prefix: the old web UI and the pi CLI. Neither is installed that way any
-# more, so a copy in the volume is stale by definition — and a stale web UI in
-# /data/npm would keep an outdated server around next to the image's own.
+#   * the migrated-install cleanup, which is what makes an upgrade from the
+#     pre-Dockerfile compose automatic instead of a manual rm -rf, and
+#   * the seeding rule — copy only when the destination is missing — which is what
+#     keeps `herdr update` / `herdr plugin update` from being rolled back by a
+#     restart.
 #
-# Note that the entrypoint has already run once by the time this script does (it
-# is the image ENTRYPOINT), which is why the guard below passes in CI: the image's
-# /usr/local/bin/collie is really there.
+# The packages the cleanup removes are the ones the old compose installed into the
+# persisted npm prefix: the previous web UI and the pi CLI. Neither is installed
+# that way any more, so a copy in the volume is stale by definition — and a stale
+# web UI in /data/npm would keep an outdated server next to the image's own.
+#
+# The entrypoint has already run once by the time this script does (it is the
+# image ENTRYPOINT), so the image seeds really do exist here.
 #
 # `-E` and the ERR trap below make a bare failing command annotate itself: job
 # logs need admin rights over the repository, so an annotation is the only reason
@@ -21,13 +25,15 @@ set -eEuo pipefail
 trap 'rc=$?; echo "::error::ci-migrated-install failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2' ERR
 
 # The paths default to the image layout; they are overridable so this test can
-# also be run by hand (with a throwaway NPM_CONFIG_PREFIX and PI_IMAGE_PREFIX)
-# without touching a real /data — a mistake worth making impossible, since the
-# same cleanup deletes a working install if it points at one.
+# also be run by hand (with a throwaway NPM_CONFIG_PREFIX and PI_APP_SEED) without
+# touching a real /data — a mistake worth making impossible, since the same
+# cleanup deletes a working install if it points at one.
 ENTRYPOINT="${ENTRYPOINT:-/usr/local/bin/docker-entrypoint.sh}"
 NPM_PREFIX="${NPM_CONFIG_PREFIX:-/data/npm}"
 NPM_LIB="${NPM_PREFIX}/lib/node_modules"
 NPM_BIN="${NPM_PREFIX}/bin"
+HERDR_INSTALL_DIR="${HERDR_INSTALL_DIR:-${HOME}/.local/bin}"
+PLUGIN_DIR="${HOME}/.config/herdr/plugins/github/devswha.herdr-web-ui"
 
 seed() {
   mkdir -p "${NPM_LIB}/pi-web-ui" "${NPM_LIB}/@earendil-works/pi-coding-agent" \
@@ -66,11 +72,11 @@ echo "OK: non-symlink bin entry kept"
 #    pre-Dockerfile container and deleted the running app's files.
 # --------------------------------------------------------------------------
 seed
-PI_IMAGE_PREFIX=/nonexistent "${ENTRYPOINT}" true
+PI_APP_SEED=/nonexistent "${ENTRYPOINT}" true
 test -e "${NPM_LIB}/pi-web-ui"
 test -e "${NPM_LIB}/@earendil-works/pi-coding-agent"
 test -L "${NPM_BIN}/pi-web-ui"
-echo "OK: cleanup skipped when the image copy is absent"
+echo "OK: cleanup skipped when the image seed is absent"
 
 # --------------------------------------------------------------------------
 # 4. idempotent: a second start with nothing to clean is a no-op
@@ -81,19 +87,43 @@ test -d "${NPM_LIB}/some-user-tool"
 echo "OK: idempotent"
 
 # --------------------------------------------------------------------------
-# 5. seeding never overwrites an install that is already there — this is what
-#    keeps `collie update` / `herdr update` from being rolled back by a restart
+# 5. seeding never overwrites something that is already there — this is what
+#    keeps `herdr update` / `herdr plugin update` from being rolled back by a
+#    restart, and what keeps a plugin's state in the volume authoritative
 # --------------------------------------------------------------------------
-COLLIE_DIR="${COLLIE_DIR:-/data/home/.local/share/collie}"
-HERDR_INSTALL_DIR="${HERDR_INSTALL_DIR:-/data/home/.local/bin}"
-printf '#!/bin/sh\necho updated-marker\n' > "${COLLIE_DIR}/current/bin/collie.updatetest"
-chmod +x "${COLLIE_DIR}/current/bin/collie.updatetest"
-marker_before="$(cat "${COLLIE_DIR}/current/bin/collie.updatetest")"
-"${ENTRYPOINT}" true
-test -f "${COLLIE_DIR}/current/bin/collie.updatetest"
-test "$(cat "${COLLIE_DIR}/current/bin/collie.updatetest")" = "${marker_before}"
 test -x "${HERDR_INSTALL_DIR}/herdr"
-rm -f "${COLLIE_DIR}/current/bin/collie.updatetest"
-echo "OK: an existing install is left alone by the seeding step"
+printf '#!/bin/sh\necho herdr-updated\n' > "${HERDR_INSTALL_DIR}/herdr.updatetest"
+chmod +x "${HERDR_INSTALL_DIR}/herdr.updatetest"
+herdr_before="$(cat "${HERDR_INSTALL_DIR}/herdr.updatetest")"
+"${ENTRYPOINT}" true
+test -f "${HERDR_INSTALL_DIR}/herdr.updatetest"
+test "$(cat "${HERDR_INSTALL_DIR}/herdr.updatetest")" = "${herdr_before}"
+test -x "${HERDR_INSTALL_DIR}/herdr"
+rm -f "${HERDR_INSTALL_DIR}/herdr.updatetest"
+
+# The plugin is the more interesting case: the entrypoint seeds a whole checkout
+# with installed dependencies, and must do so only when the volume has none. A
+# plugin *update* writes into that checkout, so an unconditional copy would undo
+# it on the next start — silently, because the plugin would still boot.
+test -f "${PLUGIN_DIR}/plugin/entry.js"
+printf 'marker\n' > "${PLUGIN_DIR}/CI-SEED-MARKER"
+"${ENTRYPOINT}" true
+test -f "${PLUGIN_DIR}/CI-SEED-MARKER"
+rm -f "${PLUGIN_DIR}/CI-SEED-MARKER"
+
+# And the registry the entrypoint repairs must keep pointing into the volume, not
+# back at the image seed, after a start over an existing install.
+node -e '
+const fs = require("fs");
+const home = process.env.HOME;
+const registry = JSON.parse(fs.readFileSync(home + "/.config/herdr/plugins.json", "utf8"));
+const entries = Array.isArray(registry) ? registry : Object.values(registry);
+for (const p of entries) {
+  const root = p.plugin_root || "";
+  if (!root.startsWith(home + "/")) { console.error("plugin_root left pointing outside the volume: " + root); process.exit(1); }
+  if (!fs.existsSync(p.manifest_path)) { console.error("manifest_path does not exist: " + p.manifest_path); process.exit(1); }
+}
+console.log("OK: registry paths resolve inside the volume (" + entries.length + " entries)");
+'
 
 echo "migrated-install test OK"

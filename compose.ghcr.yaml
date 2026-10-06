@@ -5,18 +5,20 @@
 #
 #   cp .env.example .env      # set USERDIR (and the domain)
 #   docker compose -f compose.ghcr.yaml up -d --remove-orphans
-#   docker exec -it collie collie pair      # authorize your phone
+#   docker compose -f compose.ghcr.yaml logs -f
 #
 # Adjust the Traefik host rule / cert resolver / middleware, the two bind-mount
 # paths and the external network to match your setup.
 #
-# Upgrading from the pi-web-ui image: this service is renamed, so let compose
-# clean up the old container with --remove-orphans. /data needs no migration —
-# same volume, same HOME, same agent dir.
+# Upgrading from the Collie or pi-web-ui image: this service is renamed, so let
+# compose clean up the old container with --remove-orphans. The volume needs no
+# migration — same /data, same HOME, same agent dir — though the old Collie or
+# pi-web-ui install left in the volume is removed automatically on first start
+# (see the entrypoint's cleanup).
 services:
-  collie:
+  pi:
     image: ghcr.io/ksmarty/pi-docker:latest
-    container_name: collie
+    container_name: pi
     # `init: true` reaps the zombie processes the agent's shell/PTY children
     # would otherwise leave behind as PID 1.
     init: true
@@ -24,44 +26,37 @@ services:
     # Root on purpose: the agent installs system packages (apt) and writes into
     # host bind mounts, which a non-root uid cannot do.
     user: "0:0"
-    # No `ports:` on purpose. Traefik reaches this container over the shared
-    # docker network, and publishing 8787 would invite exactly the request
-    # Collie refuses: COLLIE_PUBLIC_HOSTS puts it in strict mode, so
-    # http://<server-ip>:8787 answers a bare refusal and looks like the app never
-    # started. If you do want direct access, add that hostname to
-    # COLLIE_PUBLIC_HOSTS and add the mapping back yourself.
+    # No `ports:` on purpose. Only the reverse proxy is meant to reach the web
+    # UI, and it does so over the shared docker network. Publishing the port
+    # would put the UI on every interface of the host: the plugin has no host
+    # allow-list of its own (unlike the app this image used to ship), so an
+    # unauthenticated first visit would be the thing that gets to pair it.
     environment:
-      # The reverse proxy is the only front door, so Collie does not run
-      # `tailscale serve` (the vendor's deployment "Variant C").
-      COLLIE_SKIP_SERVE: 1
-      # Host allow-list, and why an IP:port request "does not work": Collie
-      # refuses every Host it does not recognize. Keep hosts/origins in step
-      # with the Traefik rule below.
-      COLLIE_PUBLIC_HOSTS: ${COLLIE_PUBLIC_HOSTS:-pi.notato.xyz}
-      # Without a matching origin the UI loads as an empty page — this is the
-      # single most common way a working Collie looks broken.
-      COLLIE_ALLOWED_ORIGINS: ${COLLIE_ALLOWED_ORIGINS:-https://pi.notato.xyz}
-      COLLIE_PUBLIC_URL: ${COLLIE_PUBLIC_URL:-https://pi.notato.xyz}
-      # Writes are authorized by pairing a device (`docker exec -it collie
-      # collie pair`), not by a login header, so Collie must not insist on a
-      # trusted login it will never see behind authentik.
-      COLLIE_TRUSTED_USER_OPTIONAL: 1
-      # Where the agent's project files are; the panes Collie shows open here.
-      PI_WORKSPACE_DIR: /workspace
-      # The rest of the layout (HOME, PI_CODING_AGENT_DIR, NPM_CONFIG_PREFIX,
-      # COLLIE_DIR, COLLIE_CONFIG_DIR, COLLIE_STATE_DIR, HERDR_INSTALL_DIR,
-      # COLLIE_PORT/HOST, COLLIE_MUX) is set by the image — see the Dockerfile.
+      # Bind on all interfaces: a reverse proxy in a sibling container cannot
+      # reach this container's 127.0.0.1. The plugin's own default is loopback.
+      HERDR_WEB_HOST: ${HERDR_WEB_HOST:-0.0.0.0}
+      # Keep in step with the loadbalancer label below.
+      HERDR_WEB_PORT: ${HERDR_WEB_PORT:-7317}
+      # Optional shared secret. Unset by default, which leaves the plugin's own
+      # device pairing in charge; set it to require a secret as well. The vendor
+      # recommends a token for any deployment behind a reverse proxy.
+      # HERDR_WEB_TOKEN: ${HERDR_WEB_TOKEN:-}
+      #
+      # Everything else — HOME, PI_CODING_AGENT_DIR, NPM_CONFIG_PREFIX,
+      # HERDR_INSTALL_DIR, HERDR_CONFIG_PATH, HERDR_WEB_STATE_DIR,
+      # PI_WORKSPACE_DIR — is set by the image, see the Dockerfile.
     volumes:
-      # HOME + agent config/sessions + npm global prefix + herdr state +
-      # Collie's install root and its self-updates all live under here.
+      # HOME + agent config/sessions/keys + npm global prefix + herdr state and
+      # config + the web UI plugin and its pairing data all live under here.
+      # One volume, so a backup is a single tar.
       - ${USERDIR:-.}/data/pi/data:/data
-      # The agent's project files (PI_WORKSPACE_DIR).
+      # The agent's project files (PI_WORKSPACE_DIR) — the panes open here.
       - ${USERDIR:-.}/data/pi/workspace:/workspace
     labels:
       - traefik.enable=true
       - traefik.http.routers.pi.rule=Host(`pi.notato.xyz`)
       - traefik.http.routers.pi.middlewares=authentik@file
-      - traefik.http.services.pi.loadbalancer.server.port=8787
+      - traefik.http.services.pi.loadbalancer.server.port=7317
     networks:
       - traefik
 

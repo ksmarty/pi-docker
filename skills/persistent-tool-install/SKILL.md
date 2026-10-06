@@ -1,6 +1,6 @@
 ---
 name: persistent-tool-install
-description: How to install CLI tools and language runtimes inside this pi-docker container so they survive a restart, image rebuild and `docker compose down`. Use whenever you need a tool that is not already installed (npm packages, pip/pipx/uv tools, cargo binaries, go binaries, bun tools, standalone binaries), whenever you would otherwise reach for `apt-get install`, or whenever you need to check whether an installed tool will actually still be there after a restart. Also covers why the pi CLI, herdr and Collie must never be installed this way.
+description: How to install CLI tools and language runtimes inside this pi-docker container so they survive a restart, image rebuild and `docker compose down`. Use whenever you need a tool that is not already installed (npm packages, pip/pipx/uv tools, cargo binaries, go binaries, bun tools, standalone binaries), whenever you would otherwise reach for `apt-get install`, or whenever you need to check whether an installed tool will actually still be there after a restart. Also covers why the pi CLI, bun, herdr and the herdr web UI plugin must never be installed this way.
 license: MIT
 ---
 
@@ -104,25 +104,28 @@ package is genuinely needed for the deployment, it belongs in the repo's
 
 ```bash
 npm install -g @earendil-works/pi-coding-agent  # ❌ do not
-npm install -g herdr collie collie-cli          # ❌ do not — these own their own install dirs
+npm install -g bun herdr                        # ❌ do not — the image owns these at /usr/local
+npm install -g herdr-web-ui                     # ❌ do not — it is a herdr *plugin*, not an npm tool
 herdr update                                    # ✅ the supported update path
-collie update                                   # ✅ the supported update path
+herdr plugin update devswha.herdr-web-ui        # ✅ the supported update path
 ```
 
-The `pi` CLI is **managed by the image** at `/usr/local`, which comes before
-`/data/npm` on `PATH`. To update it, update the container image (pull or rebuild
-it). A copy installed into `/data/npm` would be shadowed and inert — and
-`docker-entrypoint.sh` deletes any it finds there at startup, so installing it is
-wasted work that disappears with the next restart.
+The `pi` CLI and `bun` are **managed by the image** at `/usr/local`, which comes
+before `/data/npm` on `PATH`. To update them, update the container image (pull or
+rebuild it). A copy installed into `/data/npm` would be shadowed and inert — and
+`docker-entrypoint.sh` deletes any pi CLI it finds there at startup, so
+installing it is wasted work that disappears with the next restart.
 
-`herdr` and `collie` are **seeded into the volume** from the image on first start
-(`/data/home/.local/bin/herdr` and `/data/home/.local/share/collie`) and update
-themselves in place (`herdr update`, `collie update`, `collie update
---rollback`). Those updates are persisted, so they survive a restart *and* a
-recreate — but a *manual* copy anywhere else is not the same thing: the
-entrypoint only seeds a missing install, and the `collie` wrapper on `PATH`
-resolves its root from `$COLLIE_DIR`. Reinstalling them by hand over the seeded
-copy is how you end up with two versions and a broken `PATH` resolution.
+`herdr` and its web UI plugin are **seeded into the volume** from the image on
+first start (`/data/home/.local/bin/herdr`, and the plugin checkout under
+`/data/home/.config/herdr/plugins/`) and update themselves in place
+(`herdr update`, `herdr plugin update <plugin-id>`). Those updates are persisted,
+so they survive a restart *and* a recreate — but a *manual* copy anywhere else is
+not the same thing: the entrypoint only seeds what is missing, so reinstalling
+them by hand is how you end up with two versions and a broken `PATH` or plugin
+resolution. The web UI is a herdr plugin: installing it with `npm` creates a
+second copy that herdr does not know about, and its settings live in herdr's
+plugin config directory rather than in the package.
 
 ## When the tool must exist for every fresh deployment
 
@@ -136,7 +139,8 @@ conventions.
 ## Backups
 
 `/data` is the whole persisted state, so a single archive captures the agent's
-config, sessions, herdr's panes, Collie's pairing and every tool you installed:
+config, sessions, herdr's panes and worktrees, the web UI plugin and its pairing,
+and every tool you installed:
 
 ```bash
 tar czf pi-backup-$(date +%F).tar.gz -C /data .

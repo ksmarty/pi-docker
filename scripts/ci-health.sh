@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
 #
-# Regression test for the v0.1.0 outage, run on the CI runner against the built
-# image. That outage came from pi-web-ui's host guard, which refused every Host it
-# was not told about — including 127.0.0.1 — while fetch() cannot set a Host header
-# at all (undici drops it), so the container never looked healthy and
-# `docker compose up --wait` gave up while the app was serving fine: "it never came
-# online". Collie's guard is narrower (API routes only — see ci-host-guard.sh), but
-# the healthcheck still claims an allowed host, so this pins that a boot with a
-# strict allow-list reaches `healthy` on its own.
+# Regression test for the outage that started all of this: "I just tried it and it
+# never came online. The logs were unhelpful."
 #
-# This boots the image in exactly that configuration and requires it to reach
-# `healthy` on its own. On failure it prints — and annotates — the container
-# logs and docker's own healthcheck probe output, so the reason survives even
-# when the raw job log is not available to whoever is debugging.
+# The container *was* serving. What failed was the healthcheck, which probed the
+# web UI with a Host header the app refused, so docker reported `unhealthy`
+# forever and `docker compose up --wait` gave up while the app was fine. The
+# lesson is therefore not "add a host header" (the current plugin has no host
+# guard at all — see ci-web-ui.sh, which pins that): it is that a container whose
+# liveness probe lies about the app is indistinguishable from a broken app.
 #
-# It also proves the startup path as a whole: the bridge only starts after the
-# entrypoint has seeded Collie and herdr's server has become reachable, so a
-# healthy container means all of that worked.
+# So this boots the image the way a user does — fresh, no volume, no environment
+# beyond what the compose file sets — and requires it to reach `healthy` on its
+# own. On failure it prints and annotates the container logs *and* docker's own
+# healthcheck probe output, because an `unhealthy` with no reason in the log was
+# the entire complaint.
 #
-# `-E` and the ERR trap below cover the failures that never reach fail(): a bare
+# It also proves the startup path as a whole: the health endpoint only answers
+# once the plugin is up and linked to the herdr server, and the plugin is only
+# started after the entrypoint has seeded herdr, installed the plugin into the
+# volume and repaired its registry paths.
+#
+# `-E` and the ERR trap cover the failures that never reach fail(): a bare
 # `docker exec` assertion under `set -e` would otherwise exit silently, and job
 # logs need admin rights over the repository, so the annotation is the only
 # reason that reaches whoever is debugging.
@@ -26,7 +29,7 @@ set -eEuo pipefail
 
 trap 'rc=$?; echo "::error::ci-health failed at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2' ERR
 
-NAME=collie-hc
+NAME=herdr-web-hc
 IMAGE=pi-docker:ci
 
 annotate() { while IFS= read -r line; do printf '::error::%s\n' "${line//%/%25}"; done; }
@@ -36,21 +39,28 @@ annotate() { while IFS= read -r line; do printf '::error::%s\n' "${line//%/%25}"
 # actual error can arrive with the reason cut off entirely. An ENOENT or a stack
 # trace near the end of the log is the whole point of dumping it.
 dump_logs() {
-  docker logs "${NAME}" 2>&1 | grep -iE 'error|ENOENT|panic|fatal|refused|denied|failed|cannot' | tail -12 | annotate || true
+  docker logs "${NAME}" 2>&1 | grep -iE 'error|ENOENT|panic|fatal|refused|denied|failed|cannot|EADDRINUSE' | tail -12 | annotate || true
   docker logs "${NAME}" 2>&1 | tail -6 | annotate || true
 }
 
 cleanup() { docker rm -f "${NAME}" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
+# No volume on purpose: an empty volume is what a first run looks like, and that
+# is the path that has to work (the entrypoint seeds herdr and installs the
+# plugin into it). PORT is left at its default so a wrong default is caught.
 docker run -d --init --name "${NAME}" \
-  -e COLLIE_PUBLIC_HOSTS=pi.notato.xyz \
-  -e COLLIE_ALLOWED_ORIGINS=https://pi.notato.xyz \
+  -e HOME=/data/home \
+  -e PI_CODING_AGENT_DIR=/data/agent \
+  -e NPM_CONFIG_PREFIX=/data/npm \
+  -e HERDR_WEB_HOST=0.0.0.0 \
+  -e HERDR_WEB_PORT=7317 \
   "${IMAGE}"
 
-# Docker's probe only runs every 15s, so poll for a while: with 5 retries a
-# verdict can lag the app coming up by a minute or more, and a cold first boot
-# on an empty volume seeds Collie, starts herdr and only then binds.
+# Docker's probe only runs every 15s, so poll for a while: with 5 retries a verdict
+# can lag the app coming up by a minute or more, and a cold first boot on an empty
+# volume seeds herdr, installs the plugin's dependencies and starts the server
+# before anything binds.
 status=unknown
 for _ in $(seq 1 150); do
   status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "${NAME}" 2>/dev/null || echo gone)
@@ -61,7 +71,7 @@ for _ in $(seq 1 150); do
 done
 
 echo "health status: ${status}"
-echo "--- docker logs ---"
+echo "--- container logs ---"
 docker logs "${NAME}" 2>&1 | tail -40 || true
 echo "--- healthcheck probes (exit code + output) ---"
 docker inspect -f '{{range .State.Health.Log}}exit={{.ExitCode}} out={{.Output}}{{end}}' "${NAME}" 2>/dev/null || true
@@ -79,47 +89,52 @@ fi
 # ---------------------------------------------------------------------------
 # A 200 from /api/health could in principle come from something other than the
 # stack we ship, so the parts it depends on are asserted directly. These fail
-# loudly instead of annotating, because at this point the container is up and
-# the log above is already readable.
+# loudly instead of annotating, because at this point the container is up and the
+# log above is already readable.
 fail() {
   echo "::error::$1"
   dump_logs
   exit 1
 }
 
-docker exec "${NAME}" test -x /data/home/.local/share/collie/current/bin/collie \
-  || fail "Collie was not seeded into the volume"
-# The bridge only survives startup if COLLIE_PLUGIN_ROOT is Collie's *plugin* root
-# — the directory holding package.json and herdr-plugin.toml, i.e. `current`
-# inside a binary install and not the install root one level above it. Collie
-# trusts an injected value without checking for its marker, so an off-by-one path
-# makes readFileSync(<root>/package.json) throw before the bridge ever binds a
-# port, and the container reports "unhealthy" with the cause one line below the
-# banner. Asserted here so a regression names itself instead of just hanging.
-docker exec "${NAME}" test -f /data/home/.local/share/collie/current/package.json \
-  || fail "Collie's plugin root is missing package.json"
-docker exec "${NAME}" test -f /data/home/.local/share/collie/current/herdr-plugin.toml \
-  || fail "Collie's plugin root is missing herdr-plugin.toml — COLLIE_PLUGIN_ROOT cannot be derived from it"
-docker exec "${NAME}" test -x /data/home/.local/bin/herdr \
-  || fail "herdr was not seeded into the volume"
-docker exec "${NAME}" test ! -L /data/home/.local/share/collie \
-  || fail "Collie's install root is a symlink into the image — self-updates would be ephemeral"
-# herdr's server is the multiplexer Collie mirrors: without it the bridge has no
-# panes at all, so it is part of what "the container works" means.
-# `herdr api snapshot` goes over the socket API and exits non-zero with
-# server_not_running until the server is really listening. `herdr session list
-# --json` would NOT test this: it is a local command that exits 0 with
-# `"running": false` when nothing is up, so it passes against a container whose
-# server has died.
+# The banner is the operator's only view of what the container resolved to, and
+# the previous image's failure was invisible precisely because the banner claimed
+# one thing while the app did another. So the *effective* bind — the value from the
+# plugin's own env file, which is what the UI actually listens on — has to appear.
+banner="$(docker logs "${NAME}" 2>&1 || true)"
+grep -q 'web ui bind: 0.0.0.0:7317' <<<"${banner}" \
+  || fail "the banner does not report the effective bind (got: $(grep -o 'web ui bind:.*' <<<"${banner}" || echo 'no bind line'))"
+
+# herdr's server is the multiplexer the UI mirrors: without it the UI has no
+# panes and /api/health reports ok:false, since the plugin reports its socket
+# link in the same body.
 docker exec "${NAME}" herdr api snapshot >/dev/null \
   || fail "herdr's server is not reachable inside the container"
-# The bridge must be running as the container's main child (PID 1 is tini, from
-# init: true), not a background service that happened to leave something
-# listening. Captured into a variable on purpose: `ps | grep -q` would fail under
+docker exec "${NAME}" test -x /data/home/.local/bin/herdr \
+  || fail "herdr was not seeded into the volume"
+docker exec "${NAME}" test ! -L /data/home/.local/share/herdr \
+  || fail "the seeded herdr install is a symlink into the image — self-updates would be ephemeral"
+
+# The plugin must be installed *into the volume* and started from there. A plugin
+# served out of the image would boot fine and then lose every update on restart.
+docker exec "${NAME}" test -f /data/home/.config/herdr/plugins/github/devswha.herdr-web-ui/plugin/entry.js \
+  || fail "the web UI plugin was not seeded into the volume"
+procs="$(docker exec "${NAME}" ps -eo pid=,args= || true)"
+echo "${procs}"
+# Captured into a variable on purpose: `ps | grep -q` would fail under
 # `set -o pipefail` as soon as grep exits on the first match and ps gets SIGPIPE.
-bridge_procs="$(docker exec "${NAME}" ps -eo pid=,args= || true)"
-echo "${bridge_procs}"
-grep -q _exec-bridge <<<"${bridge_procs}" \
-  || fail "the Collie bridge is not running in the container"
+grep -q 'entry\.js' <<<"${procs}" \
+  || fail "no plugin process is running in the container"
+
+# The ui must be serving from that volume copy, not from /opt/pi-docker/seed: the
+# health body names the plugin's own root.
+health_body="$(docker exec "${NAME}" node -e '
+const port = Number(process.env.PORT || 7317);
+require("http").get({ host: "127.0.0.1", port, path: "/api/health" }, (s) => {
+  let b = ""; s.on("data", (c) => (b += c)); s.on("end", () => process.stdout.write(b));
+}).on("error", (e) => { console.error(e.message); process.exit(1); });
+' 2>&1)" || fail "/api/health could not be read from inside the container: ${health_body}"
+echo "health body: ${health_body}"
+grep -q '"ok":true' <<<"${health_body}" || fail "/api/health does not report ok:true: ${health_body}"
 
 echo "healthcheck OK"

@@ -136,7 +136,7 @@ jobs:
             type=raw,value=latest
           labels: |
             org.opencontainers.image.title=pi-docker
-            org.opencontainers.image.description=Persistent container for Herdr, the Collie PWA and the pi coding agent.
+            org.opencontainers.image.description=Persistent container for Herdr, its web UI plugin and the pi coding agent.
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.licenses=MIT
 
@@ -154,8 +154,12 @@ jobs:
             # Releases bake whatever the vendors published at that moment; the
             # checksum from the release manifest is verified at build time. Pin
             # these here if you would rather ship a fixed pair.
-            COLLIE_VERSION=latest
             HERDR_VERSION=latest
+            # The plugin is pinned rather than `latest` on purpose: the HTTP
+            # contract the image's healthcheck and CI assert was measured against
+            # this version, and a release should not silently move to a plugin
+            # whose routes differ. Bump it deliberately, with the tests re-run.
+            HERDR_WEB_UI_VERSION=v0.3.50
           pull: true
           # provenance/sbom export has been known to hang the build; not needed.
           provenance: false

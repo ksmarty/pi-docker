@@ -8,7 +8,7 @@
 onboarding = false
 
 # Layout used for panes created while no client is attached — which, in a
-# container, is all of them until you open Collie.
+# container, is all of them until you open the web UI.
 [server]
 headless_cols = 160
 headless_rows = 48
