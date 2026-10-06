@@ -315,9 +315,13 @@ LABEL org.opencontainers.image.title="pi-docker" \
       org.opencontainers.image.revision="${COMMIT}" \
       org.opencontainers.image.source="https://github.com/ksmarty/pi-docker"
 
-# /data carries the agent config, herdr's state, the web UI plugin and its
-# pairing state.
-VOLUME ["/data"]
+# The two things that persist: /data (agent config, herdr's state, the web UI
+# plugin and its pairing state) and /workspace (the projects the panes work in).
+# Both are declared so a bare `docker run` with no mounts still keeps them in
+# anonymous volumes; the deployment mounts them explicitly instead (compose maps
+# ${USERDIR}/data/pi/data and .../workspace). Nothing else may be added here —
+# the image's own packages belong in /usr/local, where an update can replace them.
+VOLUME ["/data", "/workspace"]
 
 EXPOSE 7317
 

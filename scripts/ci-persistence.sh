@@ -31,6 +31,11 @@ trap 'rc=$?; echo "::error::ci-persistence failed at line ${LINENO}: ${BASH_COMM
 NAME=herdr-web-persist
 IMAGE=pi-docker:ci
 VOL=data-test-$$
+# /workspace is a *second* volume in the real deployment — compose mounts it
+# separately from /data — so the test mounts one too. Writing to the container
+# layer instead looks identical until a recreate throws it away, which is exactly
+# how this test failed the first time it ran.
+VOLWS=data-test-ws-$$
 TOOL=cowsay
 
 annotate() { while IFS= read -r line; do printf '::error::%s\n' "${line//%/%25}"; done; }
@@ -43,6 +48,7 @@ dump_logs() {
 cleanup() {
   docker rm -f "${NAME}" >/dev/null 2>&1 || true
   docker volume rm "${VOL}" >/dev/null 2>&1 || true
+  docker volume rm "${VOLWS}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -65,6 +71,7 @@ start() {
     -e HERDR_WEB_HOST=0.0.0.0 \
     -e HERDR_WEB_PORT=7317 \
     -v "${VOL}:/data" \
+    -v "${VOLWS}:/workspace" \
     "${IMAGE}"
 }
 
@@ -99,6 +106,11 @@ echo "session-marker" > /data/agent/sessions/ci-session.json
 echo "workspace-marker" > /workspace/ci-project-file
 echo "key-marker" > /data/agent/auth.json
 '
+
+# /workspace must be a real mount before anything is written there, or the test
+# would be checking the container layer and still pass a restart.
+docker exec "${NAME}" mountpoint -q /workspace \
+  || fail "/workspace is not a mounted volume in this test (writes would land in the container layer)"
 
 # A change inside the seeded apps, standing in for `herdr update` /
 # `herdr plugin update` / editing the plugin env. It must survive.
