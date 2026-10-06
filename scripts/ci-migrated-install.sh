@@ -109,7 +109,13 @@ rm -f "${HERDR_INSTALL_DIR}/herdr.updatetest"
 # with installed dependencies, and must do so only when the volume has none. A
 # plugin *update* writes into that checkout, so an unconditional copy would undo
 # it on the next start — silently, because the plugin would still boot.
-test -f "${PLUGIN_DIR}/plugin/entry.js"
+#
+# The markers asserted are the two that define a plugin root (package.json and
+# herdr-plugin.toml) — the same pair the entrypoint itself validates before it
+# trusts a path. An invented `plugin/entry.js` asserted a layout the vendor does
+# not produce.
+test -f "${PLUGIN_DIR}/package.json"
+test -f "${PLUGIN_DIR}/herdr-plugin.toml"
 printf 'marker\n' > "${PLUGIN_DIR}/CI-SEED-MARKER"
 "${ENTRYPOINT}" true
 test -f "${PLUGIN_DIR}/CI-SEED-MARKER"
