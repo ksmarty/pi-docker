@@ -41,24 +41,33 @@ TOOL=cowsay
 annotate() { while IFS= read -r line; do printf '::error::%s\n' "${line//%/%25}"; done; }
 
 dump_logs() {
-  # The entrypoint's own lines are the first thing to look at: they say whether it
-  # seeded, registered, started or attached to a server.
-  docker logs "${NAME}" 2>&1 | grep -E '\[pi-docker\]' | tail -20 | annotate || true
-  docker logs "${NAME}" 2>&1 | grep -iE 'error|ENOENT|panic|fatal|refused|denied|failed|cannot|EADDRINUSE' | tail -10 | annotate || true
-  docker exec "${NAME}" tail -n 20 /data/home/.config/herdr/herdr-server.log 2>/dev/null | annotate || true
-  # The plugin's own state and logs. `herdr plugin log` showed nothing when the
-  # plugin never started, so the files themselves are what have to be read.
-  docker exec "${NAME}" bash -lc '
-    ls -la /data/home/.config/herdr-web-ui 2>&1
-    echo "--- log files under the plugin state and checkout:"
-    find /data/home/.config/herdr-web-ui -name "*.log" 2>/dev/null | head -5
-  ' | annotate || true
-  docker exec "${NAME}" herdr plugin list 2>&1 | annotate || true
-  # The decisive line: start the plugin by hand and print exactly what it says.
-  # This runs only after the assertion already failed, so it cannot mask anything.
-  docker exec "${NAME}" herdr plugin start devswha.herdr-web-ui 2>&1 | tail -20 | annotate || true
-  sleep 5
-  docker exec "${NAME}" ps -eo pid=,args= 2>&1 | grep -E 'managed\.ts|supervisor\.ts' | annotate || true
+  # The job log is uncapped; the annotations panel is not (10 per run, and the
+  # error line has to be one of them). So the whole dump goes to stdout and only
+  # the lines that carry the reason are annotated.
+  {
+    echo "===== container log (last 60) ====="
+    docker logs "${NAME}" 2>&1 | tail -60
+    echo "===== herdr server log (last 30) ====="
+    docker exec "${NAME}" tail -n 30 /data/home/.config/herdr/herdr-server.log 2>/dev/null
+    echo "===== plugin state dir ====="
+    docker exec "${NAME}" ls -la /data/home/.config/herdr-web-ui 2>&1
+    echo "===== herdr plugin list ====="
+    docker exec "${NAME}" herdr plugin list 2>&1
+    echo "===== herdr plugin start (manual attempt) ====="
+    docker exec "${NAME}" herdr plugin start devswha.herdr-web-ui 2>&1
+    sleep 5
+    echo "===== plugin processes after the manual start ====="
+    docker exec "${NAME}" ps -eo pid=,args= 2>&1 | grep -E 'managed\.ts|supervisor\.ts'
+    echo "===== herdr plugin log ====="
+    docker exec "${NAME}" herdr plugin log devswha.herdr-web-ui 2>&1 | tail -30
+    echo "===== end of dump ====="
+  } 2>&1 | sed 's/^/    /' || true
+
+  # Annotations: only what names the reason. The error itself is emitted by
+  # fail() before this, so it is always present.
+  docker logs "${NAME}" 2>&1 | grep -E '\[pi-docker\].*(seed|register|repair|start|already|ready|WARNING|error|Error)' | tail -6 | annotate || true
+  docker exec "${NAME}" herdr plugin list 2>&1 | tail -3 | annotate || true
+  docker exec "${NAME}" herdr plugin start devswha.herdr-web-ui 2>&1 | tail -6 | annotate || true
 }
 
 cleanup() {
