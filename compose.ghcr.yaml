@@ -73,6 +73,21 @@ services:
       - traefik.http.routers.pi-ws.priority=100
       - traefik.http.routers.pi-ws.service=pi
       - traefik.http.services.pi.loadbalancer.server.port=7317
+      # If something in front of Traefik terminates TLS (a Cloudflare tunnel, an
+      # upstream load balancer), Traefik reports X-Forwarded-Proto: http and the
+      # plugin refuses /ws with `403 invalid origin`: the page loads, the container
+      # is healthy, and the UI sits on "reconnecting to herdr web ui". Traefik only
+      # trusts an incoming X-Forwarded-Proto when told to
+      # (--forwardedHeaders.trustedIPs), so the other way to fix it is to state the
+      # scheme on the way to the backend — and the generated websecure-* router
+      # inherits the base router's middleware list, so one pair of labels is enough:
+      #
+      #   - traefik.http.middlewares.herdr-headers.headers.customRequestHeaders.X-Forwarded-Proto=https
+      #   - traefik.http.routers.pi.middlewares=authentik@file,herdr-headers
+      #
+      # Left commented out: a deployment served over plain HTTP would then be told
+      # `https` and break in the other direction. See README, "What the proxy must
+      # do", and scripts/ci-web-ui.sh, which pins both halves.
     networks:
       - traefik
 

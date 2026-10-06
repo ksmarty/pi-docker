@@ -331,6 +331,22 @@ ui" with nothing in any log naming the cause. Fix it on one side of the hop:
 - **point the tunnel at `https://traefik:443`** (TLS verification off), so Traefik
   terminates TLS itself and reports `https` on its own.
 
+If you would rather not touch the proxy, one pair of labels on this container
+states the scheme on the way to the backend instead. This is the same trick the
+sibling `location.notato.xyz` service uses with its `location-headers`
+middleware, and because the generated `websecure-*` router inherits the base
+router's middleware list, attaching it to the base router covers both:
+
+```yaml
+      - traefik.http.middlewares.herdr-headers.headers.customRequestHeaders.X-Forwarded-Proto=https
+      - traefik.http.routers.herdr.middlewares=authentik@file,herdr-headers
+```
+
+Keep `authentik@file` in that list — middlewares run in the order given, and
+dropping it silently removes the door. It is *not* the default in the shipped
+compose files: a deployment served over plain HTTP would then be told `https`
+and break in the other direction.
+
 `scripts/ci-web-ui.sh` pins both halves — `403` without the header, `101` with it
 — so this requirement cannot quietly change. The vendor's guide carries Caddy and
 nginx examples; the nginx one matters, because a bare `proxy_pass` gets *none* of
